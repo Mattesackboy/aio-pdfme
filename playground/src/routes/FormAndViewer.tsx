@@ -63,7 +63,7 @@ function FormAndViewerApp() {
         template,
         inputs,
         options: {
-          font: getFontsData(),
+          font: await getFontsData(),
           lang: 'en',
           labels: { 'signature.clear': '消去' },
           theme: {

@@ -10,9 +10,29 @@ export function fromKebabCase(str: string): string {
     .join(' ');
 }
 
-export const getFontsData = (): Font => ({
-  ...getDefaultFont(),
-  'PinyonScript-Regular': {
+const loadFontAsUint8Array = async (url: string): Promise<Uint8Array> => {
+  const response = await fetch(url);
+  const buffer = await response.arrayBuffer();
+  return new Uint8Array(buffer);
+};
+
+const DefaultFont = { ...getDefaultFont() }
+DefaultFont.Roboto.fallback = false
+
+export const getFontsData = async (): Promise<Font> => ({
+  Arial: {
+    fallback: true,
+    data: await loadFontAsUint8Array('/fonts/arial.ttf'),
+  },
+  ArialMt: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/arial-mt.ttf'),
+  },
+  ArialMtBold: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/arial-mt-bold.ttf'),
+  },
+  /*'PinyonScript-Regular': {
     fallback: false,
     data: 'https://fonts.gstatic.com/s/pinyonscript/v22/6xKpdSJbL9-e9LuoeQiDRQR8aOLQO4bhiDY.ttf',
   },
@@ -23,7 +43,8 @@ export const getFontsData = (): Font => ({
   NotoSansJP: {
     fallback: false,
     data: 'https://fonts.gstatic.com/s/notosansjp/v53/-F6jfjtqLzI2JPCgQBnw7HFyzSD-AsregP8VFBEj75vY0rw-oME.ttf',
-  }
+  },*/
+  ...DefaultFont
 });
 
 export const readFile = (file: File | null, type: 'text' | 'dataURL' | 'arrayBuffer') => {
@@ -108,7 +129,7 @@ export const generatePDF = async (currentRef: Designer | Form | Viewer | null) =
     typeof (currentRef as Viewer | Form).getInputs === 'function'
       ? (currentRef as Viewer | Form).getInputs()
       : getInputFromTemplate(template);
-  const font = getFontsData();
+  const font = await getFontsData();
 
   try {
     const pdf = await generate({
