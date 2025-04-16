@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "prod": "aio-promo-monitor"
+  },
+  "targets": {
+    "aio-promo-monitor": {
+      "hosting": {
+        "pdfme": [
+          "aio-pdfme"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}
