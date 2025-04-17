@@ -32,6 +32,18 @@ export const getFontsData = async (): Promise<Font> => ({
     fallback: false,
     data: await loadFontAsUint8Array('/fonts/arial-mt-bold.ttf'),
   },
+  Helvetica: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/helvetica-font.ttf'),
+  },
+  HelveticaBold: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/helvetica-font-bold.ttf'),
+  },
+  HelveticaLight: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/helvetica-font-light.ttf'),
+  },
   /*'PinyonScript-Regular': {
     fallback: false,
     data: 'https://fonts.gstatic.com/s/pinyonscript/v22/6xKpdSJbL9-e9LuoeQiDRQR8aOLQO4bhiDY.ttf',
@@ -44,7 +56,7 @@ export const getFontsData = async (): Promise<Font> => ({
     fallback: false,
     data: 'https://fonts.gstatic.com/s/notosansjp/v53/-F6jfjtqLzI2JPCgQBnw7HFyzSD-AsregP8VFBEj75vY0rw-oME.ttf',
   },*/
-  ...DefaultFont
+  ...DefaultFont,
 });
 
 export const readFile = (file: File | null, type: 'text' | 'dataURL' | 'arrayBuffer') => {
