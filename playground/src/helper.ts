@@ -16,23 +16,51 @@ const loadFontAsUint8Array = async (url: string): Promise<Uint8Array> => {
   return new Uint8Array(buffer);
 };
 
-const DefaultFont = { ...getDefaultFont() }
-DefaultFont.Roboto.fallback = false
+const DefaultFont = { ...getDefaultFont() };
+DefaultFont.Roboto.fallback = false;
 
 export const getFontsData = async (): Promise<Font> => ({
-  Arial: {
+  Helvetica: {
     fallback: true,
+    data: await loadFontAsUint8Array('/fonts/helvetica.ttf'),
+  },
+  HelveticaBold: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/helvetica-bold.ttf'),
+  },
+  HelveticaLight: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/helvetica-light.ttf'),
+  },
+  Arial: {
+    fallback: false,
     data: await loadFontAsUint8Array('/fonts/arial.ttf'),
   },
-  ArialMt: {
+  ArialBold: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/arial-mt.ttf'),
+    data: await loadFontAsUint8Array('/fonts/arial-bold.ttf'),
   },
-  ArialMtBold: {
+  MyriadProRegular: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/arial-mt-bold.ttf'),
+    data: await loadFontAsUint8Array('/fonts/myriad-pro-regular.otf'),
   },
-  Helvetica: {
+  MyriadProBold: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/myriad-pro-bold.otf'),
+  },
+  HelveticaOblique: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/helvetica-oblique.ttf'),
+  },
+  HelveticaBoldOblique: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/helvetica-bold-oblique.ttf'),
+  },
+  HelveticaLightOblique: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/helvetica-light-oblique.ttf'),
+  },
+  /*Helvetica: {
     fallback: false,
     data: await loadFontAsUint8Array('/fonts/helvetica-font.ttf'),
   },
@@ -43,7 +71,7 @@ export const getFontsData = async (): Promise<Font> => ({
   HelveticaLight: {
     fallback: false,
     data: await loadFontAsUint8Array('/fonts/helvetica-font-light.ttf'),
-  },
+  },*/
   /*'PinyonScript-Regular': {
     fallback: false,
     data: 'https://fonts.gstatic.com/s/pinyonscript/v22/6xKpdSJbL9-e9LuoeQiDRQR8aOLQO4bhiDY.ttf',
@@ -103,7 +131,7 @@ export const downloadJsonFile = (json: unknown, title: string) => {
 
 export const handleLoadTemplate = (
   e: React.ChangeEvent<HTMLInputElement>,
-  currentRef: Designer | Form | Viewer | null
+  currentRef: Designer | Form | Viewer | null,
 ) => {
   if (e.target && e.target.files && e.target.files[0]) {
     getTemplateFromJsonFile(e.target.files[0])
@@ -180,11 +208,11 @@ export const getBlankTemplate = () =>
       height: 297,
       padding: [20, 10, 20, 10],
     },
-  } as Template);
+  }) as Template;
 
 export const getTemplateById = async (templateId: string): Promise<Template> => {
   const template = await fetch(`/template-assets/${templateId}/template.json`).then((res) =>
-    res.json()
+    res.json(),
   );
   checkTemplate(template);
   return template as Template;
