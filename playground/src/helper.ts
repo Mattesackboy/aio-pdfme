@@ -60,6 +60,10 @@ export const getFontsData = async (): Promise<Font> => ({
     fallback: false,
     data: await loadFontAsUint8Array('/fonts/helvetica-light-oblique.ttf'),
   },
+  OpenSans: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/OpenSans-VariableFont.ttf'),
+  },
   /*Helvetica: {
     fallback: false,
     data: await loadFontAsUint8Array('/fonts/helvetica-font.ttf'),
