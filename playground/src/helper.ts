@@ -60,9 +60,21 @@ export const getFontsData = async (): Promise<Font> => ({
     fallback: false,
     data: await loadFontAsUint8Array('/fonts/helvetica-light-oblique.ttf'),
   },
-  OpenSans: {
+  OpenSansRegular: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/OpenSans-VariableFont.ttf'),
+    data: await loadFontAsUint8Array('/fonts/OpenSans-Regular.ttf'),
+  },
+  OpenSansMedium: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/OpenSans-Medium.ttf'),
+  },
+  OpenSansSemiBold: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/OpenSans-SemiBold.ttf'),
+  },
+  OpenSansBold: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/OpenSans-Bold.ttf'),
   },
   /*Helvetica: {
     fallback: false,
