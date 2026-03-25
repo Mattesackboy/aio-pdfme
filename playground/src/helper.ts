@@ -76,6 +76,22 @@ export const getFontsData = async (): Promise<Font> => ({
     fallback: false,
     data: await loadFontAsUint8Array('/fonts/OpenSans-Bold.ttf'),
   },
+  SegoeUI: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/segoe-ui.ttf'),
+  },
+  SegoeUIBold: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/segoe-ui-bold.ttf'),
+  },
+  SegoeUIItalic: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/segoe-ui-italic.ttf'),
+  },
+  SegoeUIBoldItalic: {
+    fallback: false,
+    data: await loadFontAsUint8Array('/fonts/segoe-ui-bold-italic.ttf'),
+  },
   /*Helvetica: {
     fallback: false,
     data: await loadFontAsUint8Array('/fonts/helvetica-font.ttf'),
