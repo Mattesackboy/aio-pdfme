@@ -1,0 +1,11 @@
+--- a/packages/ui/src/hooks.ts
++++ b/packages/ui/src/hooks.ts
+@@ -163,6 +163,8 @@
+       setPageSizes(pageSizes);
+       setScale(scale);
+       setBackgrounds(backgrounds);
++      // A later successful init (e.g. Load Template after a broken basePdf) leaves the error screen.
++      setError(null);
+     } catch (err) {
+       if (isLatest()) throw err;
+     }

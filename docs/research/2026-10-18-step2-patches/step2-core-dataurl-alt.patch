@@ -1,0 +1,391 @@
+--- a/packages/converter/src/index.browser.ts
++++ b/packages/converter/src/index.browser.ts
+@@ -29,7 +29,7 @@
+   options: Pdf2ImgOptions = {},
+ ): Promise<ArrayBuffer[]> =>
+   _pdf2img(pdf, options, {
+-    getDocument: (pdf) => pdfjsLib.getDocument(pdf).promise,
++    getDocument: (pdf) => pdfjsLib.getDocument({ data: pdf, isEvalSupported: false }).promise,
+     createCanvas: (width, height) => {
+       const canvas = document.createElement('canvas');
+       canvas.width = width;
+@@ -45,7 +45,7 @@
+ 
+ export const pdf2size = async (pdf: ArrayBuffer | Uint8Array, options: Pdf2SizeOptions = {}) =>
+   _pdf2size(pdf, options, {
+-    getDocument: (pdf) => pdfjsLib.getDocument(pdf).promise,
++    getDocument: (pdf) => pdfjsLib.getDocument({ data: pdf, isEvalSupported: false }).promise,
+   });
+ 
+ export { img2pdf } from './img2pdf.js';
+--- a/packages/converter/src/pdf2img.ts
++++ b/packages/converter/src/pdf2img.ts
+@@ -31,33 +31,44 @@
+     const { getDocument, createCanvas, canvasToArrayBuffer } = env;
+ 
+     const pdfDoc = await getDocument(pdf);
+-    const numPages = pdfDoc.numPages;
++    try {
++      const numPages = pdfDoc.numPages;
+ 
+-    const startPage = Math.max(start + 1, 1);
+-    const endPage = Math.min(end + 1, numPages);
++      const startPage = Math.max(start + 1, 1);
++      const endPage = Math.min(end + 1, numPages);
+ 
+-    const results: ArrayBuffer[] = [];
++      const results: ArrayBuffer[] = [];
+ 
+-    for (let pageNum = startPage; pageNum <= endPage; pageNum++) {
+-      const page = await pdfDoc.getPage(pageNum);
+-      const viewport = page.getViewport({ scale });
++      for (let pageNum = startPage; pageNum <= endPage; pageNum++) {
++        const page = await pdfDoc.getPage(pageNum);
++        const viewport = page.getViewport({ scale });
+ 
+-      const canvas = createCanvas(viewport.width, viewport.height);
+-      if (!canvas) {
+-        throw new Error('Failed to create canvas');
+-      }
++        const canvas = createCanvas(viewport.width, viewport.height);
++        if (!canvas) {
++          throw new Error('Failed to create canvas');
++        }
+ 
+-      const context = canvas.getContext('2d') as CanvasRenderingContext2D;
+-      if (!context) {
+-        throw new Error('Failed to get canvas context');
++        const context = canvas.getContext('2d') as CanvasRenderingContext2D;
++        if (!context) {
++          throw new Error('Failed to get canvas context');
++        }
++
++        await page.render({ canvasContext: context, viewport }).promise;
++        const arrayBuffer = canvasToArrayBuffer(canvas, imageType);
++        results.push(arrayBuffer);
++
++        // Free the page's parsed resources and the canvas backing store now, not at the next GC
++        // (at the Designer's scale 8 an A4 page is a 4762x6735 canvas, ~128 MB).
++        page.cleanup();
++        canvas.width = 0;
++        canvas.height = 0;
+       }
+ 
+-      await page.render({ canvasContext: context, viewport }).promise;
+-      const arrayBuffer = canvasToArrayBuffer(canvas, imageType);
+-      results.push(arrayBuffer);
++      return results;
++    } finally {
++      // Also removes the FontFaces pdf.js added to document.fonts for this document.
++      await pdfDoc.destroy();
+     }
+-
+-    return results;
+   } catch (error) {
+     throw new Error(`[@pdfme/converter] pdf2img failed: ${(error as Error).message}`);
+   }
+--- a/packages/converter/src/pdf2size.ts
++++ b/packages/converter/src/pdf2size.ts
+@@ -19,15 +19,17 @@
+ 
+   const pdfDoc = await getDocument(pdf);
+ 
+-  const promises = Promise.all(
+-    new Array(pdfDoc.numPages).fill('').map(async (_, i) => {
+-      return await pdfDoc.getPage(i + 1).then((page) => {
+-        const { height, width } = page.getViewport({ scale, rotation: 0 });
++  try {
++    return await Promise.all(
++      new Array(pdfDoc.numPages).fill('').map(async (_, i) => {
++        return await pdfDoc.getPage(i + 1).then((page) => {
++          const { height, width } = page.getViewport({ scale, rotation: 0 });
+ 
+-        return { height: pt2mm(height), width: pt2mm(width) };
+-      });
+-    }),
+-  );
+-
+-  return promises;
++          return { height: pt2mm(height), width: pt2mm(width) };
++        });
++      }),
++    );
++  } finally {
++    await pdfDoc.destroy();
++  }
+ }
+--- a/packages/ui/src/components/Designer/index.tsx
++++ b/packages/ui/src/components/Designer/index.tsx
+@@ -15,7 +15,12 @@
+ import RightSidebar from './RightSidebar/index.js';
+ import LeftSidebar from './LeftSidebar.js';
+ import Canvas from './Canvas/index.js';
+-import { RULER_HEIGHT, RIGHT_SIDEBAR_WIDTH, LEFT_SIDEBAR_WIDTH } from '../../constants.js';
++import {
++  RULER_HEIGHT,
++  RIGHT_SIDEBAR_WIDTH,
++  LEFT_SIDEBAR_WIDTH,
++  MAX_HISTORY_LENGTH,
++} from '../../constants.js';
+ import { I18nContext, OptionsContext, PluginsRegistry } from '../../contexts.js';
+ import {
+   schemasList2template,
+@@ -73,6 +78,28 @@
+   const [zoomLevel, setZoomLevel] = useState(1);
+   const [sidebarOpen, setSidebarOpen] = useState(true);
+   const [prevTemplate, setPrevTemplate] = useState<Template | null>(null);
++  // The class keeps the template this editor hands it (onChangeTemplate / onSaveTemplate) and
++  // passes that same object back on its next render (resize, lang change). That echo must not
++  // trigger the full re-sync below, which re-creates every schema id, drops the selection and
++  // scrolls to the top. Real updates (updateTemplate, Load Template, ...) arrive as new objects.
++  // TODO(undo-emit): undo/redo (timeTravel in hooks.ts) change the schemas without emitting, so
++  // after an undo getTemplate() (Save Local, DL Template, Generate PDF) returns the pre-undo
++  // template until the next edit. Pre-existing in 5.3.15; upstream emits on undo since #1643.
++  const lastEmittedTemplate = useRef<Template | null>(null);
++  const emitChangeTemplate = useCallback(
++    (t: Template) => {
++      lastEmittedTemplate.current = t;
++      onChangeTemplate(t);
++    },
++    [onChangeTemplate],
++  );
++  const emitSaveTemplate = useCallback(
++    (t: Template) => {
++      lastEmittedTemplate.current = t;
++      onSaveTemplate(t);
++    },
++    [onSaveTemplate],
++  );
+ 
+   const { backgrounds, pageSizes, scale, error, refresh } = useUIPreProcessor({
+     template,
+@@ -107,12 +134,13 @@
+     (newSchemas: SchemaForUI[]) => {
+       future.current = [];
+       past.current.push(cloneDeep(schemasList[pageCursor]));
++      if (past.current.length > MAX_HISTORY_LENGTH) past.current.shift();
+       const _schemasList = cloneDeep(schemasList);
+       _schemasList[pageCursor] = newSchemas;
+       setSchemasList(_schemasList);
+-      onChangeTemplate(schemasList2template(_schemasList, template.basePdf));
++      emitChangeTemplate(schemasList2template(_schemasList, template.basePdf));
+     },
+-    [template, schemasList, pageCursor, onChangeTemplate],
++    [template, schemasList, pageCursor, emitChangeTemplate],
+   );
+ 
+   const removeSchemas = useCallback(
+@@ -146,7 +174,7 @@
+     changeSchemas,
+     commitSchemas,
+     removeSchemas,
+-    onSaveTemplate,
++    onSaveTemplate: emitSaveTemplate,
+     past,
+     future,
+     setSchemasList,
+@@ -224,7 +252,7 @@
+   const updatePage = async (sl: SchemaForUI[][], newPageCursor: number) => {
+     setPageCursor(newPageCursor);
+     const newTemplate = schemasList2template(sl, template.basePdf);
+-    onChangeTemplate(newTemplate);
++    emitChangeTemplate(newTemplate);
+     await updateTemplate(newTemplate);
+     void refresh(newTemplate);
+ 
+@@ -253,7 +281,9 @@
+ 
+   if (prevTemplate !== template) {
+     setPrevTemplate(template);
+-    void updateTemplate(template);
++    if (template !== lastEmittedTemplate.current) {
++      void updateTemplate(template);
++    }
+   }
+ 
+   const canvasWidth = size.width - LEFT_SIDEBAR_WIDTH;
+--- a/packages/ui/src/constants.ts
++++ b/packages/ui/src/constants.ts
+@@ -15,3 +15,6 @@
+ export const BACKGROUND_COLOR = 'rgb(74, 74, 74)';
+ 
+ export const DEFAULT_MAX_ZOOM = 2;
++
++// Undo/redo depth: each entry is a deep copy of a page's schemas (upstream MAX_HISTORY_LENGTH, #1643).
++export const MAX_HISTORY_LENGTH = 100;
+--- a/packages/ui/src/hooks.ts
++++ b/packages/ui/src/hooks.ts
+@@ -4,6 +4,7 @@
+   ZOOM,
+   Template,
+   Size,
++  BasePdf,
+   getB64BasePdf,
+   b64toUint8Array,
+   SchemaForUI,
+@@ -21,7 +22,7 @@
+   initShortCuts,
+   destroyShortCuts,
+ } from './helper.js';
+-import { RULER_HEIGHT } from './constants.js';
++import { RULER_HEIGHT, MAX_HISTORY_LENGTH } from './constants.js';
+ 
+ export const usePrevious = <T>(value: T) => {
+   const ref = useRef<T | null>(null);
+@@ -37,12 +38,60 @@
+ 
+ type UIPreProcessorProps = { template: Template; size: Size; zoomLevel: number; maxZoom: number };
+ 
++type BasePdfRaster = { pageSizes: Size[]; backgrounds: string[] };
++
+ export const useUIPreProcessor = ({ template, size, zoomLevel, maxZoom }: UIPreProcessorProps) => {
+   const [backgrounds, setBackgrounds] = useState<string[]>([]);
+   const [pageSizes, setPageSizes] = useState<Size[]>([]);
+   const [scale, setScale] = useState(0);
+   const [error, setError] = useState<Error | null>(null);
+ 
++  // A real basePdf is rasterized at scale = maxZoom (A4 at 800%: 4762x6735 px), which is slow,
++  // so the raster is made once and reused while the basePdf stays the same: a resize or the
++  // class re-sending the edited template then only recomputes the scale. Keyed by the basePdf
++  // itself (=== compares a string, data URI or URL, by its text and binary data by reference)
++  // and maxZoom.
++  // Blank-basePdf pages are never cached: they follow the current (dynamic) template's schemas.
++  // Data URLs, not blob: URLs: Chrome reuses an identical data URL, while every new blob: URL
++  // kept ~4.5 MB of renderer memory alive (measured over 30 basePdf switches).
++  const rasterCache = useRef<{
++    basePdf: BasePdf;
++    maxZoom: number;
++    promise: Promise<BasePdfRaster>;
++  } | null>(null);
++  const requestId = useRef(0);
++  const isMounted = useRef(true);
++
++  const getRaster = (basePdf: string | ArrayBuffer | Uint8Array, maxZoom: number) => {
++    const cached = rasterCache.current;
++    if (cached && cached.basePdf === basePdf && cached.maxZoom === maxZoom) {
++      return cached.promise;
++    }
++
++    const promise = (async (): Promise<BasePdfRaster> => {
++      const _basePdf = await getB64BasePdf(basePdf);
++
++      const uint8Array = b64toUint8Array(_basePdf);
++      // Create a new ArrayBuffer copy to avoid detachment issues
++      const pdfArrayBuffer = new ArrayBuffer(uint8Array.byteLength);
++      new Uint8Array(pdfArrayBuffer).set(uint8Array);
++
++      const [_pages, imgBuffers] = await Promise.all([
++        pdf2size(pdfArrayBuffer),
++        pdf2img(pdfArrayBuffer.slice(), { scale: maxZoom }),
++      ]);
++      return { pageSizes: _pages, backgrounds: imgBuffers.map(arrayBufferToBase64) };
++    })();
++
++    const entry: NonNullable<typeof rasterCache.current> = { basePdf, maxZoom, promise };
++    rasterCache.current = entry;
++    promise.catch(() => {
++      // never keep a failed raster
++      if (rasterCache.current === entry) rasterCache.current = null;
++    });
++    return promise;
++  };
++
+   const init = async (prop: { template: Template; size: Size }) => {
+     const {
+       template: { basePdf, schemas },
+@@ -64,21 +113,11 @@
+       );
+       _pageSizes = schemas.map(() => ({ width, height }));
+     } else {
+-      const _basePdf = await getB64BasePdf(basePdf);
+-
+-      const uint8Array = b64toUint8Array(_basePdf);
+-      // Create a new ArrayBuffer copy to avoid detachment issues
+-      const pdfArrayBuffer = new ArrayBuffer(uint8Array.byteLength);
+-      new Uint8Array(pdfArrayBuffer).set(uint8Array);
+-
+-      const [_pages, imgBuffers] = await Promise.all([
+-        pdf2size(pdfArrayBuffer),
+-        pdf2img(pdfArrayBuffer.slice(), { scale: maxZoom }),
+-      ]);
+-      _pageSizes = _pages;
++      const raster = await getRaster(basePdf, maxZoom);
++      _pageSizes = raster.pageSizes;
+       paperWidth = _pageSizes[0].width * ZOOM;
+       paperHeight = _pageSizes[0].height * ZOOM;
+-      _backgrounds = imgBuffers.map(arrayBufferToBase64);
++      _backgrounds = raster.backgrounds;
+     }
+ 
+     const _scale = Math.min(
+@@ -93,30 +132,43 @@
+     };
+   };
+ 
++  // Only the latest init may set the state (or the error): an older one that finishes later,
++  // e.g. the raster of a basePdf that was replaced meanwhile, is dropped.
++  const runInit = async (prop: { template: Template; size: Size }) => {
++    const id = ++requestId.current;
++    const isLatest = () => isMounted.current && id === requestId.current;
++    try {
++      const { pageSizes, scale, backgrounds } = await init(prop);
++      if (!isLatest()) return;
++      setPageSizes(pageSizes);
++      setScale(scale);
++      setBackgrounds(backgrounds);
++    } catch (err) {
++      if (isLatest()) throw err;
++    }
++  };
++
+   useEffect(() => {
+-    init({ template, size })
+-      .then(({ pageSizes, scale, backgrounds }) => {
+-        setPageSizes(pageSizes);
+-        setScale(scale);
+-        setBackgrounds(backgrounds);
+-      })
+-      .catch((err: Error) => {
+-        setError(err);
+-        console.error('[@pdfme/ui]', err);
+-      });
++    runInit({ template, size }).catch((err: Error) => {
++      setError(err);
++      console.error('[@pdfme/ui]', err);
++    });
+   }, [template, size]);
+ 
++  useEffect(
++    () => () => {
++      isMounted.current = false;
++      rasterCache.current = null;
++    },
++    [],
++  );
++
+   return {
+     backgrounds,
+     pageSizes,
+     scale: scale * zoomLevel,
+     error,
+-    refresh: (template: Template) =>
+-      init({ template, size }).then(({ pageSizes, scale, backgrounds }) => {
+-        setPageSizes(pageSizes);
+-        setScale(scale);
+-        setBackgrounds(backgrounds);
+-      }),
++    refresh: (template: Template) => runInit({ template, size }),
+   };
+ };
+ 
+@@ -228,7 +280,9 @@
+       const isUndo = mode === 'undo';
+       const stack = isUndo ? past : future;
+       if (stack.current.length <= 0) return;
+-      (isUndo ? future : past).current.push(cloneDeep(schemasList[pageCursor]));
++      const destination = (isUndo ? future : past).current;
++      destination.push(cloneDeep(schemasList[pageCursor]));
++      if (destination.length > MAX_HISTORY_LENGTH) destination.shift();
+       const s = cloneDeep(schemasList);
+       s[pageCursor] = stack.current.pop()!;
+       setSchemasList(s);

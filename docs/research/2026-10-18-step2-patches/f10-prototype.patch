@@ -1,0 +1,603 @@
+diff --git a/packages/converter/src/detailRenderer.browser.ts b/packages/converter/src/detailRenderer.browser.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/converter/src/detailRenderer.browser.ts
+@@ -0,0 +1,99 @@
++import * as pdfjsLib from 'pdfjs-dist';
++import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from 'pdfjs-dist';
++import type { PdfDetailRenderer } from './detailRenderer.types.js';
++// The pdf.js worker as source text. It is turned into a same-origin Blob URL at runtime, so the
++// @pdfme/ui library build ships no separate worker file. TODO(f10-detail-layer): +1.1 MB of bundle;
++// the base raster (pdf2img/pdf2size) keeps using the main-thread fake worker of index.browser.ts.
++import pdfWorkerSource from 'pdfjs-dist/build/pdf.worker.min.js?raw';
++
++let workerUrl: string | null = null;
++const getWorkerUrl = () => {
++  if (!workerUrl) {
++    workerUrl = URL.createObjectURL(new Blob([pdfWorkerSource], { type: 'text/javascript' }));
++  }
++  return workerUrl;
++};
++
++export const createPdfDetailRenderer = async (
++  pdf: ArrayBuffer | Uint8Array,
++  options: { useWorker?: boolean } = {},
++): Promise<PdfDetailRenderer> => {
++  const { useWorker = true } = options;
++  let webWorker: Worker | null = null;
++  let pdfWorker: pdfjsLib.PDFWorker | null = null;
++  if (useWorker && typeof Worker !== 'undefined') {
++    try {
++      webWorker = new Worker(getWorkerUrl());
++      // pdfjs-dist 3.11 types declare `port` as null; a Worker is what pdf.js expects.
++      pdfWorker = new pdfjsLib.PDFWorker({ port: webWorker as unknown as null });
++    } catch (e) {
++      console.warn('[@pdfme/converter] detail renderer: no Web Worker, using the main thread', e);
++      webWorker?.terminate();
++      webWorker = null;
++      pdfWorker = null;
++    }
++  }
++  const releaseWorker = () => {
++    pdfWorker?.destroy();
++    webWorker?.terminate();
++    pdfWorker = null;
++    webWorker = null;
++  };
++
++  const loadingTask = pdfjsLib.getDocument({
++    data: pdf,
++    isEvalSupported: false,
++    ...(pdfWorker ? { worker: pdfWorker } : {}),
++  });
++  let doc: PDFDocumentProxy;
++  try {
++    doc = await loadingTask.promise;
++  } catch (e) {
++    releaseWorker();
++    throw e;
++  }
++
++  let destroyed = false;
++  const pages = new Map<number, Promise<PDFPageProxy>>();
++  const getPage = (pageIndex: number) => {
++    let p = pages.get(pageIndex);
++    if (!p) {
++      p = doc.getPage(pageIndex + 1);
++      pages.set(pageIndex, p);
++    }
++    return p;
++  };
++
++  return {
++    numPages: doc.numPages,
++    usesWorker: !!pdfWorker,
++    render: ({ pageIndex, canvas, scale, offsetX, offsetY }) => {
++      let task: RenderTask | null = null;
++      let cancelled = false;
++      const promise = (async () => {
++        const page = await getPage(pageIndex);
++        if (cancelled || destroyed) throw new Error('cancelled');
++        const viewport = page.getViewport({ scale, offsetX, offsetY });
++        const canvasContext = canvas.getContext('2d') as CanvasRenderingContext2D;
++        task = page.render({ canvasContext, viewport });
++        await task.promise;
++      })();
++      return {
++        promise,
++        cancel: () => {
++          cancelled = true;
++          task?.cancel();
++        },
++      };
++    },
++    destroy: async () => {
++      if (destroyed) return;
++      destroyed = true;
++      try {
++        await loadingTask.destroy();
++      } finally {
++        releaseWorker();
++      }
++    },
++  };
++};
+diff --git a/packages/converter/src/detailRenderer.types.ts b/packages/converter/src/detailRenderer.types.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/converter/src/detailRenderer.types.ts
+@@ -0,0 +1,28 @@
++export interface DetailRenderArg {
++  /** 0-based page index. */
++  pageIndex: number;
++  /** Target canvas; its width/height (device px) are set by the caller. */
++  canvas: HTMLCanvasElement;
++  /** Device pixels per PDF point. */
++  scale: number;
++  /** Position of the page's top-left corner in canvas pixels (usually <= 0). */
++  offsetX: number;
++  offsetY: number;
++}
++
++export interface DetailRenderTask {
++  promise: Promise<void>;
++  cancel: () => void;
++}
++
++/**
++ * One pdf.js document kept alive for repeated region renders (the Designer's high-zoom detail
++ * layer). Parsing runs in a real Web Worker when available; painting runs on the main thread in
++ * pdf.js' own ~15 ms requestAnimationFrame slices.
++ */
++export interface PdfDetailRenderer {
++  readonly numPages: number;
++  readonly usesWorker: boolean;
++  render: (arg: DetailRenderArg) => DetailRenderTask;
++  destroy: () => Promise<void>;
++}
+diff --git a/packages/converter/src/index.browser.ts b/packages/converter/src/index.browser.ts
+--- a/packages/converter/src/index.browser.ts
++++ b/packages/converter/src/index.browser.ts
+@@ -49,3 +49,9 @@
+   });
+ 
+ export { img2pdf } from './img2pdf.js';
++export { createPdfDetailRenderer } from './detailRenderer.browser.js';
++export type {
++  PdfDetailRenderer,
++  DetailRenderArg,
++  DetailRenderTask,
++} from './detailRenderer.types.js';
+diff --git a/packages/converter/src/index.node.ts b/packages/converter/src/index.node.ts
+--- a/packages/converter/src/index.node.ts
++++ b/packages/converter/src/index.node.ts
+@@ -4,6 +4,7 @@
+ import { createCanvas } from 'canvas';
+ import { pdf2img as _pdf2img, Pdf2ImgOptions } from './pdf2img.js';
+ import { pdf2size as _pdf2size, Pdf2SizeOptions } from './pdf2size.js';
++import type { PdfDetailRenderer } from './detailRenderer.types.js';
+ 
+ pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJSWorker as unknown as string;
+ 
+@@ -31,3 +32,15 @@
+   });
+ 
+ export { img2pdf } from './img2pdf.js';
++export type {
++  PdfDetailRenderer,
++  DetailRenderArg,
++  DetailRenderTask,
++} from './detailRenderer.types.js';
++
++// The detail renderer draws into DOM canvases; it exists only in the browser entry.
++export const createPdfDetailRenderer: (
++  pdf: ArrayBuffer | Uint8Array,
++  options?: { useWorker?: boolean },
++) => Promise<PdfDetailRenderer> = () =>
++  Promise.reject(new Error('[@pdfme/converter] createPdfDetailRenderer is browser-only'));
+diff --git a/packages/converter/src/raw-modules.d.ts b/packages/converter/src/raw-modules.d.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/converter/src/raw-modules.d.ts
+@@ -0,0 +1,5 @@
++// Vite `?raw` imports (resolved by the @pdfme/ui build): the file's content as a string.
++declare module '*?raw' {
++  const content: string;
++  export default content;
++}
+diff --git a/packages/ui/src/components/Designer/Canvas/index.tsx b/packages/ui/src/components/Designer/Canvas/index.tsx
+--- a/packages/ui/src/components/Designer/Canvas/index.tsx
++++ b/packages/ui/src/components/Designer/Canvas/index.tsx
+@@ -97,6 +97,8 @@
+   changeSchemas: ChangeSchemas;
+   removeSchemas: (ids: string[]) => void;
+   paperRefs: MutableRefObject<HTMLDivElement[]>;
++  /** Containers of the high-zoom detail layer (see useDetailLayer), one per page. */
++  detailLayerRefs?: MutableRefObject<HTMLDivElement[]>;
+   sidebarOpen: boolean;
+ }
+ 
+@@ -116,6 +118,7 @@
+     removeSchemas,
+     onChangeHoveringSchemaId,
+     paperRefs,
++    detailLayerRefs,
+     sidebarOpen,
+   } = props;
+   const { token } = theme.useToken();
+@@ -427,6 +430,26 @@
+         pageSizes={pageSizes}
+         backgrounds={backgrounds}
+         hasRulers={true}
++        renderPaperUnderlay={
++          detailLayerRefs && !isBlankPdf(basePdf)
++            ? ({ index, paperSize }) => (
++                <div
++                  ref={(e) => {
++                    if (e) detailLayerRefs.current[index] = e;
++                  }}
++                  style={{
++                    position: 'absolute',
++                    top: 0,
++                    left: 0,
++                    width: paperSize.width,
++                    height: paperSize.height,
++                    overflow: 'hidden',
++                    pointerEvents: 'none',
++                  }}
++                />
++              )
++            : undefined
++        }
+         renderPaper={({ index, paperSize }) => (
+           <>
+             {!editing && activeElements.length > 0 && pageCursor === index && (
+diff --git a/packages/ui/src/components/Designer/index.tsx b/packages/ui/src/components/Designer/index.tsx
+--- a/packages/ui/src/components/Designer/index.tsx
++++ b/packages/ui/src/components/Designer/index.tsx
+@@ -27,6 +27,7 @@
+   useMaxZoom,
+ } from '../../helper.js';
+ import { useUIPreProcessor, useScrollPageCursor, useInitEvents } from '../../hooks.js';
++import { useDetailLayer } from './useDetailLayer.js';
+ import Root from '../Root.js';
+ import ErrorScreen from '../ErrorScreen.js';
+ import CtlBar from '../CtlBar.js';
+@@ -60,6 +61,7 @@
+   const future = useRef<SchemaForUI[][]>([]);
+   const canvasRef = useRef<HTMLDivElement>(null);
+   const paperRefs = useRef<HTMLDivElement[]>([]);
++  const detailLayerRefs = useRef<HTMLDivElement[]>([]);
+ 
+   const i18n = useContext(I18nContext);
+   const pluginsRegistry = useContext(PluginsRegistry);
+@@ -79,6 +81,16 @@
+     size,
+     zoomLevel,
+     maxZoom,
++  });
++
++  useDetailLayer({
++    basePdf: template.basePdf,
++    scrollRef: canvasRef,
++    paperRefs,
++    layerRefs: detailLayerRefs,
++    scale,
++    pageSizes,
++    baseRasterScale: maxZoom,
+   });
+ 
+   const onEdit = (targets: HTMLElement[]) => {
+@@ -347,6 +359,7 @@
+           <Canvas
+             ref={canvasRef}
+             paperRefs={paperRefs}
++            detailLayerRefs={detailLayerRefs}
+             basePdf={template.basePdf}
+             hoveringSchemaId={hoveringSchemaId}
+             onChangeHoveringSchemaId={onChangeHoveringSchemaId}
+diff --git a/packages/ui/src/components/Designer/useDetailLayer.ts b/packages/ui/src/components/Designer/useDetailLayer.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/ui/src/components/Designer/useDetailLayer.ts
+@@ -0,0 +1,292 @@
++import { MutableRefObject, RefObject, useEffect, useRef } from 'react';
++import {
++  BasePdf,
++  Size,
++  ZOOM,
++  b64toUint8Array,
++  getB64BasePdf,
++  isBlankPdf,
++  pt2mm,
++} from '@pdfme/common';
++import { createPdfDetailRenderer } from '@pdfme/converter';
++import type { PdfDetailRenderer, DetailRenderTask } from '@pdfme/converter';
++
++/**
++ * F10 high-zoom detail layer (docs/research/2026-10-17-designer-crash-study.md, F10).
++ *
++ * The page background stays the unchanged scale-`maxZoom` bitmap. When the zoom asks for more
++ * device pixels per PDF point than that bitmap has, the visible part of each page is rendered
++ * again at exactly 1 device pixel per canvas pixel into a canvas that lies inside the page div,
++ * under the schemas (pointer-events: none). It is refreshed SETTLE_MS after the last
++ * scroll/zoom/resize, superseded renders are cancelled, and the document is destroyed when
++ * basePdf changes or the Designer unmounts. Until a refresh lands, the user sees the base bitmap
++ * (or the previous detail canvas, still aligned), so nothing is ever blurrier than without it.
++ */
++
++// PDF point -> paper CSS px at scale 1, with the same constants that size the Paper and stretch the
++// background (pdf2size -> pt2mm, then * ZOOM): 0.3528 * 3.7795275591 = 1.33342, not exactly 4/3.
++const PX_PER_PT = pt2mm(1) * ZOOM;
++// Quiet time after the last scroll/zoom/resize before the visible region is re-rendered.
++const SETTLE_MS = 100;
++
++// TODO(f10-prototype): runtime knobs for the measurements; remove before shipping.
++type F10Knobs = { enabled?: boolean; useWorker?: boolean; settleMs?: number; hint?: boolean };
++const knobs = (): F10Knobs =>
++  (typeof window !== 'undefined' &&
++    (window as unknown as { __PDFME_F10__?: F10Knobs }).__PDFME_F10__) ||
++  {};
++
++type Rect = { left: number; top: number; right: number; bottom: number };
++type Placed = {
++  canvas: HTMLCanvasElement;
++  layer: HTMLDivElement;
++  scale: number;
++  dpr: number;
++  rel: Rect;
++};
++type Job = { scale: number; dpr: number; rel: Rect; w: number; h: number; devPerPt: number };
++
++const releaseCanvas = (canvas: HTMLCanvasElement) => {
++  canvas.remove();
++  // Free the backing store now instead of at the next GC.
++  canvas.width = 0;
++  canvas.height = 0;
++};
++
++const covers = (outer: Rect, inner: Rect) =>
++  outer.left <= inner.left + 0.01 &&
++  outer.top <= inner.top + 0.01 &&
++  outer.right >= inner.right - 0.01 &&
++  outer.bottom >= inner.bottom - 0.01;
++
++const isWhole = (v: number) => Math.abs(v - Math.round(v)) < 0.02;
++
++export const useDetailLayer = ({
++  basePdf,
++  scrollRef,
++  paperRefs,
++  layerRefs,
++  scale,
++  pageSizes,
++  baseRasterScale,
++}: {
++  basePdf: BasePdf;
++  scrollRef: RefObject<HTMLDivElement>;
++  paperRefs: MutableRefObject<HTMLDivElement[]>;
++  layerRefs: MutableRefObject<HTMLDivElement[]>;
++  /** Current Paper transform scale (fit scale x zoom level). */
++  scale: number;
++  /** From useUIPreProcessor: a new array after every (re)rasterization of the background. */
++  pageSizes: Size[];
++  /** Device px per PDF point of the background bitmap (= maxZoom / 100, see useUIPreProcessor). */
++  baseRasterScale: number;
++}) => {
++  const renderer = useRef<PdfDetailRenderer | null>(null);
++  const placed = useRef<(Placed | null)[]>([]);
++  const inflight = useRef<({ task: DetailRenderTask } | null)[]>([]);
++  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
++  const pageCount = pageSizes.length;
++  const live = useRef({ scale, pageCount, baseRasterScale });
++  live.current = { scale, pageCount, baseRasterScale };
++
++  const cancelPage = (i: number) => {
++    const f = inflight.current[i];
++    if (!f) return;
++    inflight.current[i] = null;
++    f.task.cancel(); // its canvas is released when the task's promise settles
++  };
++  const clearPage = (i: number) => {
++    cancelPage(i);
++    const p = placed.current[i];
++    if (p) releaseCanvas(p.canvas);
++    placed.current[i] = null;
++  };
++  const clearAll = () => {
++    if (timer.current) clearTimeout(timer.current);
++    timer.current = null;
++    const n = Math.max(placed.current.length, inflight.current.length);
++    for (let i = 0; i < n; i++) clearPage(i);
++    const paperOuter = paperRefs.current[0]?.parentElement;
++    if (paperOuter) paperOuter.style.willChange = '';
++  };
++
++  const startRender = (i: number, r: PdfDetailRenderer, job: Job) => {
++    cancelPage(i);
++    const canvas = document.createElement('canvas');
++    canvas.width = job.w;
++    canvas.height = job.h;
++    const t0 = performance.now();
++    const task = r.render({
++      pageIndex: i,
++      canvas,
++      scale: job.devPerPt,
++      offsetX: -job.rel.left,
++      offsetY: -job.rel.top,
++    });
++    const entry = { task };
++    inflight.current[i] = entry;
++    task.promise.then(
++      () => {
++        if (inflight.current[i] !== entry || renderer.current !== r) return releaseCanvas(canvas);
++        inflight.current[i] = null;
++        const layer = layerRefs.current[i];
++        if (!layer || !layer.isConnected) return releaseCanvas(canvas);
++        const k = job.dpr * job.scale; // device px per paper CSS px
++        // Size in screen CSS px and undo the Paper's scale(s) with a transform: CSS lengths are
++        // snapped to 1/64 px by layout (a paper-px width like 199.067px would composite the canvas
++        // at 0.99998x, i.e. resampled and visibly blurred), transforms are not.
++        Object.assign(canvas.style, {
++          position: 'absolute',
++          left: '0px',
++          top: '0px',
++          width: `${job.w / job.dpr}px`,
++          height: `${job.h / job.dpr}px`,
++          transformOrigin: '0 0',
++          transform: `translate(${job.rel.left / k}px, ${job.rel.top / k}px) scale(${1 / job.scale})`,
++          pointerEvents: 'none',
++        });
++        canvas.setAttribute('data-pdfme-detail', '');
++        layer.appendChild(canvas);
++        const old = placed.current[i];
++        if (old) releaseCanvas(old.canvas);
++        placed.current[i] = { canvas, layer, scale: job.scale, dpr: job.dpr, rel: job.rel };
++        // TODO(f10-prototype): measurement hook.
++        performance.measure('pdfme-f10-render', {
++          start: t0,
++          end: performance.now(),
++          detail: { page: i, w: job.w, h: job.h, worker: r.usesWorker },
++        });
++      },
++      () => {
++        // Cancelled or failed: the base bitmap (or the previous detail canvas) stays visible.
++        if (inflight.current[i] === entry) inflight.current[i] = null;
++        releaseCanvas(canvas);
++      },
++    );
++  };
++
++  const update = () => {
++    timer.current = null;
++    const r = renderer.current;
++    const scroller = scrollRef.current;
++    if (!r || !scroller) return;
++    const { scale: s, pageCount: n, baseRasterScale: base } = live.current;
++    const dpr = window.devicePixelRatio || 1;
++    const devPerPt = PX_PER_PT * s * dpr;
++    const needed = devPerPt > base * 1.001;
++    // Chrome 155 resamples a canvas inside the non-composited scale(s) container unless that
++    // container is its own compositing layer (measured: 1-px stripes blur at s=5.36, exact with this
++    // hint; Chrome 134 is exact either way). Only set while the detail layer is active, so that below
++    // the threshold nothing changes compared with today. TODO(f10-detail-layer): a Paper prop instead.
++    const paperOuter = paperRefs.current[0]?.parentElement;
++    if (paperOuter)
++      paperOuter.style.willChange = needed && knobs().hint !== false ? 'transform' : '';
++    const sr = scroller.getBoundingClientRect();
++    const clip: Rect = {
++      left: Math.max(0, sr.left + scroller.clientLeft),
++      top: Math.max(0, sr.top + scroller.clientTop),
++      right: Math.min(window.innerWidth, sr.left + scroller.clientLeft + scroller.clientWidth),
++      bottom: Math.min(window.innerHeight, sr.top + scroller.clientTop + scroller.clientHeight),
++    };
++    for (let i = 0; i < Math.min(n, r.numPages); i++) {
++      const pageEl = paperRefs.current[i];
++      if (!needed || !pageEl || !pageEl.isConnected || !layerRefs.current[i]) {
++        clearPage(i);
++        continue;
++      }
++      const pr = pageEl.getBoundingClientRect();
++      const vis: Rect = {
++        left: Math.max(pr.left, clip.left),
++        top: Math.max(pr.top, clip.top),
++        right: Math.min(pr.right, clip.right),
++        bottom: Math.min(pr.bottom, clip.bottom),
++      };
++      if (vis.right - vis.left < 1 || vis.bottom - vis.top < 1) {
++        clearPage(i);
++        continue;
++      }
++      // Snap the canvas to whole device pixels so that it is composited 1:1.
++      const pox = pr.left * dpr;
++      const poy = pr.top * dpr;
++      const dl = Math.floor(vis.left * dpr);
++      const dt = Math.floor(vis.top * dpr);
++      const dr = Math.ceil(vis.right * dpr);
++      const db = Math.ceil(vis.bottom * dpr);
++      const rel: Rect = { left: dl - pox, top: dt - poy, right: dr - pox, bottom: db - poy };
++      const p = placed.current[i];
++      if (
++        p &&
++        !inflight.current[i] &&
++        p.layer === layerRefs.current[i] &&
++        p.canvas.isConnected &&
++        p.scale === s &&
++        p.dpr === dpr &&
++        covers(p.rel, rel) &&
++        isWhole(pox + p.rel.left) &&
++        isWhole(poy + p.rel.top)
++      ) {
++        continue; // the current detail canvas still covers the view, 1:1
++      }
++      startRender(i, r, { scale: s, dpr, rel, w: dr - dl, h: db - dt, devPerPt });
++    }
++    for (let i = Math.min(n, r.numPages); i < placed.current.length; i++) clearPage(i);
++  };
++
++  const schedule = () => {
++    // Free the main thread while the user is scrolling/zooming: cancel what is in flight.
++    for (let i = 0; i < inflight.current.length; i++) cancelPage(i);
++    if (timer.current) clearTimeout(timer.current);
++    timer.current = setTimeout(update, knobs().settleMs ?? SETTLE_MS);
++  };
++
++  // One pdf.js document per basePdf, destroyed on change/unmount.
++  useEffect(() => {
++    clearAll();
++    if (knobs().enabled === false || isBlankPdf(basePdf)) return;
++    let cancelled = false;
++    let opened: PdfDetailRenderer | null = null;
++    void (async () => {
++      const t0 = performance.now();
++      const bytes = b64toUint8Array(await getB64BasePdf(basePdf));
++      if (cancelled) return;
++      opened = await createPdfDetailRenderer(bytes, { useWorker: knobs().useWorker !== false });
++      if (cancelled) {
++        void opened.destroy();
++        return;
++      }
++      renderer.current = opened;
++      performance.measure('pdfme-f10-open', { start: t0, end: performance.now() });
++      schedule();
++    })().catch((e) => console.warn('[@pdfme/ui] detail layer disabled:', e));
++    return () => {
++      cancelled = true;
++      clearAll();
++      if (opened) void opened.destroy();
++      if (renderer.current === opened) renderer.current = null;
++    };
++  }, [basePdf]);
++
++  // Re-evaluate after zoom (scale) changes and after the background was (re)rasterized (the Paper
++  // may have re-created its page divs) ...
++  useEffect(() => {
++    if (renderer.current) schedule();
++  }, [scale, pageSizes, baseRasterScale]);
++
++  // ... and after scrolling or resizing.
++  useEffect(() => {
++    const scroller = scrollRef.current;
++    if (!scroller) return;
++    const onChange = () => {
++      if (renderer.current) schedule();
++    };
++    scroller.addEventListener('scroll', onChange, { passive: true });
++    window.addEventListener('resize', onChange);
++    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onChange) : null;
++    ro?.observe(scroller);
++    return () => {
++      scroller.removeEventListener('scroll', onChange);
++      window.removeEventListener('resize', onChange);
++      ro?.disconnect();
++    };
++  }, [scrollRef.current]);
++};
+diff --git a/packages/ui/src/components/Paper.tsx b/packages/ui/src/components/Paper.tsx
+--- a/packages/ui/src/components/Paper.tsx
++++ b/packages/ui/src/components/Paper.tsx
+@@ -12,6 +12,8 @@
+   backgrounds: string[];
+   renderPaper: (arg: { index: number; paperSize: Size }) => ReactNode;
+   renderSchema: (arg: { index: number; schema: SchemaForUI }) => ReactNode;
++  /** Rendered first inside each page, i.e. above the background and under everything else. */
++  renderPaperUnderlay?: (arg: { index: number; paperSize: Size }) => ReactNode;
+   hasRulers?: boolean;
+ }) => {
+   const {
+@@ -23,6 +25,7 @@
+     backgrounds,
+     renderPaper,
+     renderSchema,
++    renderPaperUnderlay,
+     hasRulers,
+   } = props;
+   const font = useContext(FontContext);
+@@ -93,6 +96,7 @@
+               ...paperSize,
+             }}
+           >
++            {renderPaperUnderlay && renderPaperUnderlay({ paperSize, index: paperIndex })}
+             {renderPaper({ paperSize, index: paperIndex })}
+             {schemasList[paperIndex].map((schema, schemaIndex) => {
+               return (

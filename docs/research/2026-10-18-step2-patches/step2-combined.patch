@@ -1,0 +1,933 @@
+--- a/packages/converter/src/index.browser.ts
++++ b/packages/converter/src/index.browser.ts
+@@ -29,7 +29,7 @@
+   options: Pdf2ImgOptions = {},
+ ): Promise<ArrayBuffer[]> =>
+   _pdf2img(pdf, options, {
+-    getDocument: (pdf) => pdfjsLib.getDocument(pdf).promise,
++    getDocument: (pdf) => pdfjsLib.getDocument({ data: pdf, isEvalSupported: false }).promise,
+     createCanvas: (width, height) => {
+       const canvas = document.createElement('canvas');
+       canvas.width = width;
+@@ -45,7 +45,7 @@
+ 
+ export const pdf2size = async (pdf: ArrayBuffer | Uint8Array, options: Pdf2SizeOptions = {}) =>
+   _pdf2size(pdf, options, {
+-    getDocument: (pdf) => pdfjsLib.getDocument(pdf).promise,
++    getDocument: (pdf) => pdfjsLib.getDocument({ data: pdf, isEvalSupported: false }).promise,
+   });
+ 
+ export { img2pdf } from './img2pdf.js';
+--- a/packages/converter/src/pdf2img.ts
++++ b/packages/converter/src/pdf2img.ts
+@@ -31,33 +31,44 @@
+     const { getDocument, createCanvas, canvasToArrayBuffer } = env;
+ 
+     const pdfDoc = await getDocument(pdf);
+-    const numPages = pdfDoc.numPages;
++    try {
++      const numPages = pdfDoc.numPages;
+ 
+-    const startPage = Math.max(start + 1, 1);
+-    const endPage = Math.min(end + 1, numPages);
++      const startPage = Math.max(start + 1, 1);
++      const endPage = Math.min(end + 1, numPages);
+ 
+-    const results: ArrayBuffer[] = [];
++      const results: ArrayBuffer[] = [];
+ 
+-    for (let pageNum = startPage; pageNum <= endPage; pageNum++) {
+-      const page = await pdfDoc.getPage(pageNum);
+-      const viewport = page.getViewport({ scale });
++      for (let pageNum = startPage; pageNum <= endPage; pageNum++) {
++        const page = await pdfDoc.getPage(pageNum);
++        const viewport = page.getViewport({ scale });
+ 
+-      const canvas = createCanvas(viewport.width, viewport.height);
+-      if (!canvas) {
+-        throw new Error('Failed to create canvas');
+-      }
++        const canvas = createCanvas(viewport.width, viewport.height);
++        if (!canvas) {
++          throw new Error('Failed to create canvas');
++        }
+ 
+-      const context = canvas.getContext('2d') as CanvasRenderingContext2D;
+-      if (!context) {
+-        throw new Error('Failed to get canvas context');
++        const context = canvas.getContext('2d') as CanvasRenderingContext2D;
++        if (!context) {
++          throw new Error('Failed to get canvas context');
++        }
++
++        await page.render({ canvasContext: context, viewport }).promise;
++        const arrayBuffer = canvasToArrayBuffer(canvas, imageType);
++        results.push(arrayBuffer);
++
++        // Free the page's parsed resources and the canvas backing store now, not at the next GC
++        // (at the Designer's scale 8 an A4 page is a 4762x6735 canvas, ~128 MB).
++        page.cleanup();
++        canvas.width = 0;
++        canvas.height = 0;
+       }
+ 
+-      await page.render({ canvasContext: context, viewport }).promise;
+-      const arrayBuffer = canvasToArrayBuffer(canvas, imageType);
+-      results.push(arrayBuffer);
++      return results;
++    } finally {
++      // Also removes the FontFaces pdf.js added to document.fonts for this document.
++      await pdfDoc.destroy();
+     }
+-
+-    return results;
+   } catch (error) {
+     throw new Error(`[@pdfme/converter] pdf2img failed: ${(error as Error).message}`);
+   }
+--- a/packages/converter/src/pdf2size.ts
++++ b/packages/converter/src/pdf2size.ts
+@@ -19,15 +19,17 @@
+ 
+   const pdfDoc = await getDocument(pdf);
+ 
+-  const promises = Promise.all(
+-    new Array(pdfDoc.numPages).fill('').map(async (_, i) => {
+-      return await pdfDoc.getPage(i + 1).then((page) => {
+-        const { height, width } = page.getViewport({ scale, rotation: 0 });
++  try {
++    return await Promise.all(
++      new Array(pdfDoc.numPages).fill('').map(async (_, i) => {
++        return await pdfDoc.getPage(i + 1).then((page) => {
++          const { height, width } = page.getViewport({ scale, rotation: 0 });
+ 
+-        return { height: pt2mm(height), width: pt2mm(width) };
+-      });
+-    }),
+-  );
+-
+-  return promises;
++          return { height: pt2mm(height), width: pt2mm(width) };
++        });
++      }),
++    );
++  } finally {
++    await pdfDoc.destroy();
++  }
+ }
+--- a/packages/ui/src/class.ts
++++ b/packages/ui/src/class.ts
+@@ -1,6 +1,5 @@
+ import ReactDOM from 'react-dom';
+ import { DESTROYED_ERR_MSG, DEFAULT_LANG } from './constants.js';
+-import { debounce } from './helper.js';
+ import {
+   cloneDeep,
+   Template,
+@@ -35,15 +34,23 @@
+ 
+   private options: UIOptions = {};
+ 
+-  private readonly setSize = debounce(() => {
+-    if (!this.domContainer) throw Error(DESTROYED_ERR_MSG);
+-    this.size = {
+-      height: this.domContainer.clientHeight || window.innerHeight,
+-      width: this.domContainer.clientWidth || window.innerWidth,
+-    };
+-    this.render();
+-  }, 100);
++  private resizeTimer: ReturnType<typeof setTimeout> | null = null;
+ 
++  // Re-measure and re-render 100 ms after the last container resize (debounced). destroy() clears
++  // the pending timer, so a destroyed instance never renders or throws from a timer again.
++  private readonly setSize = () => {
++    if (this.resizeTimer) clearTimeout(this.resizeTimer);
++    this.resizeTimer = setTimeout(() => {
++      this.resizeTimer = null;
++      if (!this.domContainer) return;
++      this.size = {
++        height: this.domContainer.clientHeight || window.innerHeight,
++        width: this.domContainer.clientWidth || window.innerWidth,
++      };
++      this.render();
++    }, 100);
++  };
++
+   resizeObserver = new ResizeObserver(this.setSize);
+ 
+   constructor(props: UIProps) {
+@@ -118,9 +125,13 @@
+ 
+   public destroy() {
+     if (!this.domContainer) throw Error(DESTROYED_ERR_MSG);
++    // Stop the resize path first: no pending debounced render, no further observer callbacks.
++    if (this.resizeTimer) {
++      clearTimeout(this.resizeTimer);
++      this.resizeTimer = null;
++    }
++    this.resizeObserver.disconnect();
+     ReactDOM.unmountComponentAtNode(this.domContainer);
+-
+-    this.resizeObserver.unobserve(this.domContainer);
+     this.domContainer = null;
+   }
+ 
+--- a/packages/ui/src/components/Designer/index.tsx
++++ b/packages/ui/src/components/Designer/index.tsx
+@@ -15,7 +15,12 @@
+ import RightSidebar from './RightSidebar/index.js';
+ import LeftSidebar from './LeftSidebar.js';
+ import Canvas from './Canvas/index.js';
+-import { RULER_HEIGHT, RIGHT_SIDEBAR_WIDTH, LEFT_SIDEBAR_WIDTH } from '../../constants.js';
++import {
++  RULER_HEIGHT,
++  RIGHT_SIDEBAR_WIDTH,
++  LEFT_SIDEBAR_WIDTH,
++  MAX_HISTORY_LENGTH,
++} from '../../constants.js';
+ import { I18nContext, OptionsContext, PluginsRegistry } from '../../contexts.js';
+ import {
+   schemasList2template,
+@@ -73,6 +78,28 @@
+   const [zoomLevel, setZoomLevel] = useState(1);
+   const [sidebarOpen, setSidebarOpen] = useState(true);
+   const [prevTemplate, setPrevTemplate] = useState<Template | null>(null);
++  // The class keeps the template this editor hands it (onChangeTemplate / onSaveTemplate) and
++  // passes that same object back on its next render (resize, lang change). That echo must not
++  // trigger the full re-sync below, which re-creates every schema id, drops the selection and
++  // scrolls to the top. Real updates (updateTemplate, Load Template, ...) arrive as new objects.
++  // TODO(undo-emit): undo/redo (timeTravel in hooks.ts) change the schemas without emitting, so
++  // after an undo getTemplate() (Save Local, DL Template, Generate PDF) returns the pre-undo
++  // template until the next edit. Pre-existing in 5.3.15; upstream emits on undo since #1643.
++  const lastEmittedTemplate = useRef<Template | null>(null);
++  const emitChangeTemplate = useCallback(
++    (t: Template) => {
++      lastEmittedTemplate.current = t;
++      onChangeTemplate(t);
++    },
++    [onChangeTemplate],
++  );
++  const emitSaveTemplate = useCallback(
++    (t: Template) => {
++      lastEmittedTemplate.current = t;
++      onSaveTemplate(t);
++    },
++    [onSaveTemplate],
++  );
+ 
+   const { backgrounds, pageSizes, scale, error, refresh } = useUIPreProcessor({
+     template,
+@@ -107,12 +134,13 @@
+     (newSchemas: SchemaForUI[]) => {
+       future.current = [];
+       past.current.push(cloneDeep(schemasList[pageCursor]));
++      if (past.current.length > MAX_HISTORY_LENGTH) past.current.shift();
+       const _schemasList = cloneDeep(schemasList);
+       _schemasList[pageCursor] = newSchemas;
+       setSchemasList(_schemasList);
+-      onChangeTemplate(schemasList2template(_schemasList, template.basePdf));
++      emitChangeTemplate(schemasList2template(_schemasList, template.basePdf));
+     },
+-    [template, schemasList, pageCursor, onChangeTemplate],
++    [template, schemasList, pageCursor, emitChangeTemplate],
+   );
+ 
+   const removeSchemas = useCallback(
+@@ -146,7 +174,7 @@
+     changeSchemas,
+     commitSchemas,
+     removeSchemas,
+-    onSaveTemplate,
++    onSaveTemplate: emitSaveTemplate,
+     past,
+     future,
+     setSchemasList,
+@@ -224,7 +252,7 @@
+   const updatePage = async (sl: SchemaForUI[][], newPageCursor: number) => {
+     setPageCursor(newPageCursor);
+     const newTemplate = schemasList2template(sl, template.basePdf);
+-    onChangeTemplate(newTemplate);
++    emitChangeTemplate(newTemplate);
+     await updateTemplate(newTemplate);
+     void refresh(newTemplate);
+ 
+@@ -253,7 +281,9 @@
+ 
+   if (prevTemplate !== template) {
+     setPrevTemplate(template);
+-    void updateTemplate(template);
++    if (template !== lastEmittedTemplate.current) {
++      void updateTemplate(template);
++    }
+   }
+ 
+   const canvasWidth = size.width - LEFT_SIDEBAR_WIDTH;
+--- a/packages/ui/src/components/Root.tsx
++++ b/packages/ui/src/components/Root.tsx
+@@ -1,9 +1,72 @@
+ import React, { useContext, forwardRef, ReactNode, Ref, useEffect } from 'react';
+-import { Size } from '@pdfme/common';
++import { Size, Font } from '@pdfme/common';
+ import { FontContext } from '../contexts.js';
+ import { BACKGROUND_COLOR } from '../constants.js';
+ import Spinner from './Spinner.js';
+ 
++type FontSource = Font[string]['data'];
++type FontFaceEntry = {
++  source: FontSource;
++  face: FontFace;
++  refs: number;
++  deleted: boolean;
++  deleteTimer: ReturnType<typeof setTimeout> | null;
++};
++
++// Page-wide FontFace registry: one FontFace per font family and source, shared by every mounted UI
++// instance and deleted from document.fonts once no Root has used it for FONT_FACE_RELEASE_DELAY_MS.
++// (Before, every mount added a new FontFace for every font and none was ever removed.) The delay
++// lets a remount (Designer <-> Form/Viewer, mode switch, updateOptions) reuse the loaded faces instead
++// of reloading them and showing the fallback font meanwhile. The family stays the font key, so CSS
++// `fontFamily: 'SegoeUI'` still resolves.
++const FONT_FACE_RELEASE_DELAY_MS = 10000;
++const fontFaces = new Map<string, FontFaceEntry>();
++
++const acquireFontFace = (family: string, source: FontSource): FontFaceEntry => {
++  const registered = fontFaces.get(family);
++  // Same source = the same URL string or the same binary object.
++  if (registered && registered.source === source) {
++    if (registered.deleteTimer) clearTimeout(registered.deleteTimer);
++    registered.deleteTimer = null;
++    registered.refs++;
++    return registered;
++  }
++  const entry: FontFaceEntry = {
++    source,
++    face: new FontFace(family, typeof source === 'string' ? `url(${source})` : source, {
++      display: 'swap',
++    }),
++    refs: 1,
++    deleted: false,
++    deleteTimer: null,
++  };
++  // A new source for a registered family takes over for later mounts; the old face stays in
++  // document.fonts until its own users release it.
++  fontFaces.set(family, entry);
++  entry.face.load().then(
++    () => {
++      if (!entry.deleted) document.fonts.add(entry.face);
++    },
++    () => {
++      // Not added; forget it so that the next mount tries again.
++      if (fontFaces.get(family) === entry) fontFaces.delete(family);
++    },
++  );
++  return entry;
++};
++
++const releaseFontFace = (family: string, entry: FontFaceEntry) => {
++  entry.refs--;
++  if (entry.refs > 0) return;
++  entry.deleteTimer = setTimeout(() => {
++    entry.deleteTimer = null;
++    if (entry.refs > 0) return;
++    entry.deleted = true;
++    document.fonts.delete(entry.face);
++    if (fontFaces.get(family) === entry) fontFaces.delete(family);
++  }, FONT_FACE_RELEASE_DELAY_MS);
++};
++
+ type Props = { size: Size; scale: number; children: ReactNode };
+ 
+ const Root = ({ size, scale, children }: Props, ref: Ref<HTMLDivElement>) => {
+@@ -11,21 +74,10 @@
+ 
+   useEffect(() => {
+     if (!document || !document.fonts) return;
+-    const fontFaces = Object.entries(font).map(
+-      ([key, { data }]) =>
+-        new FontFace(key, typeof data === 'string' ? `url(${data})` : data, {
+-          display: 'swap',
+-        }),
++    const acquired = Object.entries(font).map(
++      ([family, { data }]) => [family, acquireFontFace(family, data)] as const,
+     );
+-    const newFontFaces = fontFaces.filter((fontFace) => !document.fonts.has(fontFace));
+-
+-    void Promise.allSettled(newFontFaces.map((f) => f.load())).then((loadedFontFaces) => {
+-      loadedFontFaces.forEach((loadedFontFace) => {
+-        if (loadedFontFace.status === 'fulfilled') {
+-          document.fonts.add(loadedFontFace.value);
+-        }
+-      });
+-    });
++    return () => acquired.forEach(([family, entry]) => releaseFontFace(family, entry));
+   }, [font]);
+ 
+   return (
+--- a/packages/ui/src/constants.ts
++++ b/packages/ui/src/constants.ts
+@@ -15,3 +15,6 @@
+ export const BACKGROUND_COLOR = 'rgb(74, 74, 74)';
+ 
+ export const DEFAULT_MAX_ZOOM = 2;
++
++// Undo/redo depth: each entry is a deep copy of a page's schemas (upstream MAX_HISTORY_LENGTH, #1643).
++export const MAX_HISTORY_LENGTH = 100;
+--- a/packages/ui/src/hooks.ts
++++ b/packages/ui/src/hooks.ts
+@@ -4,6 +4,7 @@
+   ZOOM,
+   Template,
+   Size,
++  BasePdf,
+   getB64BasePdf,
+   b64toUint8Array,
+   SchemaForUI,
+@@ -17,11 +18,10 @@
+   uuid,
+   getUniqueSchemaName,
+   moveCommandToChangeSchemasArg,
+-  arrayBufferToBase64,
+   initShortCuts,
+   destroyShortCuts,
+ } from './helper.js';
+-import { RULER_HEIGHT } from './constants.js';
++import { RULER_HEIGHT, MAX_HISTORY_LENGTH } from './constants.js';
+ 
+ export const usePrevious = <T>(value: T) => {
+   const ref = useRef<T | null>(null);
+@@ -37,12 +37,81 @@
+ 
+ type UIPreProcessorProps = { template: Template; size: Size; zoomLevel: number; maxZoom: number };
+ 
++type BasePdfRaster = { pageSizes: Size[]; backgrounds: string[] };
++
+ export const useUIPreProcessor = ({ template, size, zoomLevel, maxZoom }: UIPreProcessorProps) => {
+   const [backgrounds, setBackgrounds] = useState<string[]>([]);
+   const [pageSizes, setPageSizes] = useState<Size[]>([]);
+   const [scale, setScale] = useState(0);
+   const [error, setError] = useState<Error | null>(null);
+ 
++  // A real basePdf is rasterized at scale = maxZoom (A4 at 800%: 4762x6735 px), which is slow,
++  // so the raster is made once and reused while the basePdf stays the same: a resize or the
++  // class re-sending the edited template then only recomputes the scale. Keyed by the basePdf
++  // itself (=== compares a string, data URI or URL, by its text and binary data by reference)
++  // and maxZoom.
++  // Blank-basePdf pages are never cached: they follow the current (dynamic) template's schemas.
++  const rasterCache = useRef<{
++    basePdf: BasePdf;
++    maxZoom: number;
++    promise: Promise<BasePdfRaster>;
++    result?: BasePdfRaster;
++  } | null>(null);
++  // blob: URLs made here; each is revoked once it is neither displayed nor cached, or on unmount.
++  const ownedUrls = useRef(new Set<string>());
++  const requestId = useRef(0);
++  const isMounted = useRef(true);
++
++  const revokeOwned = (urls: Iterable<string>) => {
++    for (const url of Array.from(urls)) {
++      if (ownedUrls.current.delete(url)) URL.revokeObjectURL(url);
++    }
++  };
++
++  const getRaster = (basePdf: string | ArrayBuffer | Uint8Array, maxZoom: number) => {
++    const cached = rasterCache.current;
++    if (cached && cached.basePdf === basePdf && cached.maxZoom === maxZoom) {
++      return cached.promise;
++    }
++
++    const promise = (async (): Promise<BasePdfRaster> => {
++      const _basePdf = await getB64BasePdf(basePdf);
++
++      const uint8Array = b64toUint8Array(_basePdf);
++      // Create a new ArrayBuffer copy to avoid detachment issues
++      const pdfArrayBuffer = new ArrayBuffer(uint8Array.byteLength);
++      new Uint8Array(pdfArrayBuffer).set(uint8Array);
++
++      const [_pages, imgBuffers] = await Promise.all([
++        pdf2size(pdfArrayBuffer),
++        pdf2img(pdfArrayBuffer.slice(), { scale: maxZoom }),
++      ]);
++      if (!isMounted.current) return { pageSizes: _pages, backgrounds: [] };
++
++      const _backgrounds = imgBuffers.map((buffer) => {
++        const url = URL.createObjectURL(new Blob([buffer], { type: 'image/jpeg' }));
++        ownedUrls.current.add(url);
++        return url;
++      });
++      return { pageSizes: _pages, backgrounds: _backgrounds };
++    })();
++
++    const entry: NonNullable<typeof rasterCache.current> = { basePdf, maxZoom, promise };
++    rasterCache.current = entry;
++    promise.then(
++      (result) => {
++        entry.result = result;
++        // Replaced while it was being made: only stale inits wait for it, so it is never displayed.
++        if (rasterCache.current !== entry) revokeOwned(result.backgrounds);
++      },
++      () => {
++        // never keep a failed raster
++        if (rasterCache.current === entry) rasterCache.current = null;
++      },
++    );
++    return promise;
++  };
++
+   const init = async (prop: { template: Template; size: Size }) => {
+     const {
+       template: { basePdf, schemas },
+@@ -64,21 +133,11 @@
+       );
+       _pageSizes = schemas.map(() => ({ width, height }));
+     } else {
+-      const _basePdf = await getB64BasePdf(basePdf);
+-
+-      const uint8Array = b64toUint8Array(_basePdf);
+-      // Create a new ArrayBuffer copy to avoid detachment issues
+-      const pdfArrayBuffer = new ArrayBuffer(uint8Array.byteLength);
+-      new Uint8Array(pdfArrayBuffer).set(uint8Array);
+-
+-      const [_pages, imgBuffers] = await Promise.all([
+-        pdf2size(pdfArrayBuffer),
+-        pdf2img(pdfArrayBuffer.slice(), { scale: maxZoom }),
+-      ]);
+-      _pageSizes = _pages;
++      const raster = await getRaster(basePdf, maxZoom);
++      _pageSizes = raster.pageSizes;
+       paperWidth = _pageSizes[0].width * ZOOM;
+       paperHeight = _pageSizes[0].height * ZOOM;
+-      _backgrounds = imgBuffers.map(arrayBufferToBase64);
++      _backgrounds = raster.backgrounds;
+     }
+ 
+     const _scale = Math.min(
+@@ -93,30 +152,51 @@
+     };
+   };
+ 
++  // Only the latest init may set the state (or the error): an older one that finishes later,
++  // e.g. the raster of a basePdf that was replaced meanwhile, is dropped.
++  const runInit = async (prop: { template: Template; size: Size }) => {
++    const id = ++requestId.current;
++    const isLatest = () => isMounted.current && id === requestId.current;
++    try {
++      const { pageSizes, scale, backgrounds } = await init(prop);
++      if (!isLatest()) return;
++      setPageSizes(pageSizes);
++      setScale(scale);
++      setBackgrounds(backgrounds);
++    } catch (err) {
++      if (isLatest()) throw err;
++    }
++  };
++
+   useEffect(() => {
+-    init({ template, size })
+-      .then(({ pageSizes, scale, backgrounds }) => {
+-        setPageSizes(pageSizes);
+-        setScale(scale);
+-        setBackgrounds(backgrounds);
+-      })
+-      .catch((err: Error) => {
+-        setError(err);
+-        console.error('[@pdfme/ui]', err);
+-      });
++    runInit({ template, size }).catch((err: Error) => {
++      setError(err);
++      console.error('[@pdfme/ui]', err);
++    });
+   }, [template, size]);
+ 
++  // After a commit the displayed backgrounds are final: revoke the blob URLs nobody uses any more.
++  useEffect(() => {
++    const keep = new Set(backgrounds);
++    rasterCache.current?.result?.backgrounds.forEach((url) => keep.add(url));
++    revokeOwned(Array.from(ownedUrls.current).filter((url) => !keep.has(url)));
++  }, [backgrounds]);
++
++  useEffect(
++    () => () => {
++      isMounted.current = false;
++      rasterCache.current = null;
++      revokeOwned(ownedUrls.current);
++    },
++    [],
++  );
++
+   return {
+     backgrounds,
+     pageSizes,
+     scale: scale * zoomLevel,
+     error,
+-    refresh: (template: Template) =>
+-      init({ template, size }).then(({ pageSizes, scale, backgrounds }) => {
+-        setPageSizes(pageSizes);
+-        setScale(scale);
+-        setBackgrounds(backgrounds);
+-      }),
++    refresh: (template: Template) => runInit({ template, size }),
+   };
+ };
+ 
+@@ -228,7 +308,9 @@
+       const isUndo = mode === 'undo';
+       const stack = isUndo ? past : future;
+       if (stack.current.length <= 0) return;
+-      (isUndo ? future : past).current.push(cloneDeep(schemasList[pageCursor]));
++      const destination = (isUndo ? future : past).current;
++      destination.push(cloneDeep(schemasList[pageCursor]));
++      if (destination.length > MAX_HISTORY_LENGTH) destination.shift();
+       const s = cloneDeep(schemasList);
+       s[pageCursor] = stack.current.pop()!;
+       setSchemasList(s);
+--- a/playground/firebase.json
++++ b/playground/firebase.json
+@@ -3,7 +3,8 @@
+     {
+       "target": "pdfme",
+       "public": "dist",
+-      "ignore": ["firebase.json", "**/.*", "**/node_modules/**"]
++      "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
++      "rewrites": [{ "source": "**", "destination": "/index.html" }]
+     }
+   ]
+ }
+\ No newline at end of file
+--- a/playground/src/helper.ts
++++ b/playground/src/helper.ts
+@@ -15,7 +15,7 @@
+ const DefaultFont = { ...getDefaultFont() };
+ DefaultFont.Roboto.fallback = false;
+ 
+-export const getFontsData = async (): Promise<Font> => ({
++const loadFontsData = async (): Promise<Font> => ({
+   Helvetica: {
+     fallback: true,
+     data: fontUrl('helvetica.ttf'),
+@@ -114,6 +114,19 @@
+   },*/
+   ...DefaultFont,
+ });
++
++// Built once per page: every UI instance and generatePDF share the same Font object, so the UI
++// registers each FontFace only once (Root.tsx). A failed load is not cached.
++let fontsDataPromise: Promise<Font> | null = null;
++export const getFontsData = (): Promise<Font> => {
++  if (!fontsDataPromise) {
++    fontsDataPromise = loadFontsData().catch((e) => {
++      fontsDataPromise = null;
++      throw e;
++    });
++  }
++  return fontsDataPromise;
++};
+ 
+ export const readFile = (file: File | null, type: 'text' | 'dataURL' | 'arrayBuffer') => {
+   return new Promise<string | ArrayBuffer>((r) => {
+@@ -189,6 +202,12 @@
+   { value: 'es', label: 'Spanish' },
+ ];
+ 
++// Object URLs of the last generated PDFs. Chrome's PDF tab re-requests its URL for Download, Ctrl+S
++// and reload, so a URL is revoked only once MAX_LIVE_PDF_URLS newer PDFs exist. Each live URL keeps
++// its PDF (0.07-0.42 MB for the owner's templates) in the browser process.
++const MAX_LIVE_PDF_URLS = 10;
++const livePdfUrls: string[] = [];
++
+ export const generatePDF = async (currentRef: Designer | Form | Viewer | null) => {
+   if (!currentRef) return;
+   const template = currentRef.getTemplate();
+@@ -212,7 +231,12 @@
+     });
+ 
+     const blob = new Blob([pdf.buffer], { type: 'application/pdf' });
+-    window.open(URL.createObjectURL(blob));
++    const url = URL.createObjectURL(blob);
++    livePdfUrls.push(url);
++    if (livePdfUrls.length > MAX_LIVE_PDF_URLS) {
++      URL.revokeObjectURL(livePdfUrls.shift() as string); // the oldest
++    }
++    window.open(url);
+   } catch (e) {
+     alert(e + '\n\nCheck the console for full stack trace');
+     throw e;
+--- a/playground/src/routes/Designer.tsx
++++ b/playground/src/routes/Designer.tsx
+@@ -24,34 +24,34 @@
+ 
+   const [editingStaticSchemas, setEditingStaticSchemas] = useState(false);
+   const [originalTemplate, setOriginalTemplate] = useState<Template | null>(null);
++  // ?template= is read once, on mount: removing it from the URL must not rebuild the Designer.
++  // The first build that is not cancelled consumes it.
++  const templateIdFromQuery = useRef(searchParams.get("template"));
+ 
+-  const buildDesigner = useCallback(async () => {
++  const buildDesigner = useCallback(async (isCancelled: () => boolean) => {
+     if (!designerRef.current) return;
+-    try {
+-      let template: Template = getBlankTemplate();
+-      const templateIdFromQuery = searchParams.get("template");
+-      searchParams.delete("template");
+-      setSearchParams(searchParams, { replace: true });
+-      const templateFromLocal = localStorage.getItem("template");
++    const templateId = templateIdFromQuery.current;
++    // Rejects for an unknown id (no JSON there, e.g. Firebase's HTML page) or an invalid template.
++    const templateFromQuery = templateId
++      ? await getTemplateById(templateId).catch(() => null)
++      : null;
++    if (isCancelled()) return;
++    templateIdFromQuery.current = null;
+ 
+-      if (templateIdFromQuery) {
+-        const templateJson = await getTemplateById(templateIdFromQuery);
+-        checkTemplate(templateJson);
+-        template = templateJson;
+-        if (!templateFromLocal) {
+-          localStorage.setItem("template", JSON.stringify(templateJson));
+-        }
+-      } else if (templateFromLocal) {
+-        const templateJson = JSON.parse(templateFromLocal) as Template;
+-        checkTemplate(templateJson);
+-        template = templateJson;
+-      }
+-
++    const font = await getFontsData();
++    if (isCancelled() || !designerRef.current) return;
++    const domContainer = designerRef.current;
++    // Never leave an orphan instance (with its own ResizeObserver and fonts) behind.
++    designer.current?.destroy();
++    designer.current = null;
++    // new Designer() throws, before it observes the container, if the template's fonts or plugins
++    // are missing here (e.g. the gallery's certificate-* templates).
++    const open = (template: Template) => {
+       designer.current = new Designer({
+-        domContainer: designerRef.current,
++        domContainer,
+         template,
+         options: {
+-          font: await getFontsData(),
++          font,
+           lang: 'en',
+           labels: {
+             'signature.clear': "🗑️",
+@@ -68,11 +68,36 @@
+         plugins: getPlugins(),
+       });
+       designer.current.onSaveTemplate(onSaveTemplate);
++    };
++    const tryOpen = (template: Template) => {
++      try {
++        open(template);
++        return true;
++      } catch {
++        return false;
++      }
++    };
+ 
+-    } catch {
+-      localStorage.removeItem("template");
++    // The gallery template, else the saved one, else a blank one: always exactly one Designer.
++    const templateFromLocal = localStorage.getItem("template");
++    if (templateFromQuery && tryOpen(templateFromQuery)) {
++      if (!templateFromLocal) {
++        localStorage.setItem("template", JSON.stringify(templateFromQuery));
++      }
++      return;
+     }
+-  }, [searchParams, setSearchParams]);
++    if (templateFromLocal) {
++      try {
++        const templateJson = JSON.parse(templateFromLocal) as Template;
++        checkTemplate(templateJson);
++        open(templateJson);
++        return;
++      } catch {
++        localStorage.removeItem("template");
++      }
++    }
++    open(getBlankTemplate());
++  }, []);
+ 
+   const onChangeBasePDF = (e: React.ChangeEvent<HTMLInputElement>) => {
+     if (e.target.files?.[0]) {
+@@ -172,11 +197,21 @@
+   };
+ 
+   useEffect(() => {
++    if (!searchParams.has("template")) return;
++    searchParams.delete("template");
++    setSearchParams(searchParams, { replace: true });
++  }, [searchParams, setSearchParams]);
++
++  useEffect(() => {
++    // An effect that is cleaned up (unmount, StrictMode re-run) cancels its pending build.
++    let cancelled = false;
+     if (designerRef.current) {
+-      buildDesigner();
++      buildDesigner(() => cancelled);
+     }
+     return () => {
++      cancelled = true;
+       designer.current?.destroy();
++      designer.current = null;
+     };
+   }, [designerRef, buildDesigner]);
+ 
+--- a/playground/src/routes/FormAndViewer.tsx
++++ b/playground/src/routes/FormAndViewer.tsx
+@@ -1,7 +1,7 @@
+ import React, { useRef, useState, useEffect, useCallback } from "react";
+ import { useSearchParams } from "react-router-dom";
+ import { toast } from 'react-toastify';
+-import { Template, checkTemplate, getInputFromTemplate, Lang } from "@pdfme/common";
++import { Template, checkTemplate, checkInputs, getInputFromTemplate, Lang } from "@pdfme/common";
+ import { Form, Viewer } from "@pdfme/ui";
+ import {
+   getFontsData,
+@@ -27,43 +27,48 @@
+   const [mode, setMode] = useState<Mode>(
+     (localStorage.getItem("mode") as Mode) ?? "form"
+   );
++  // ?template= is read once, on mount: removing it from the URL must not rebuild the UI. The first
++  // build that is not cancelled consumes it; later mode switches use localStorage, as before.
++  const templateIdFromQuery = useRef(searchParams.get("template"));
+ 
+-  const buildUi = useCallback(async (mode: Mode) => {
++  const buildUi = useCallback(async (mode: Mode, isCancelled: () => boolean) => {
+     if (!uiRef.current) return;
+-    try {
+-      let template: Template = getBlankTemplate();
+-      const templateIdFromQuery = searchParams.get("template");
+-      searchParams.delete("template");
+-      setSearchParams(searchParams, { replace: true });
+-      const templateFromLocal = localStorage.getItem("template");
++    const templateId = templateIdFromQuery.current;
++    // Rejects for an unknown id (no JSON there, e.g. Firebase's HTML page) or an invalid template.
++    const templateFromQuery = templateId
++      ? await getTemplateById(templateId).catch(() => null)
++      : null;
++    if (isCancelled()) return;
++    templateIdFromQuery.current = null;
+ 
+-      if (templateIdFromQuery) {
+-        const templateJson = await getTemplateById(templateIdFromQuery);
+-        checkTemplate(templateJson);
+-        template = templateJson;
+-
+-        if (!templateFromLocal) {
+-          localStorage.setItem("template", JSON.stringify(templateJson));
+-        }
+-      } else if (templateFromLocal) {
+-        const templateJson = JSON.parse(templateFromLocal) as Template;
+-        checkTemplate(templateJson);
+-        template = templateJson;
+-      }
+-
++    const font = await getFontsData();
++    if (isCancelled() || !uiRef.current) return;
++    const domContainer = uiRef.current;
++    // Never leave an orphan instance (with its own ResizeObserver and fonts) behind.
++    ui.current?.destroy();
++    ui.current = null;
++    // new Form/Viewer() throws, before it observes the container, if the template's fonts or
++    // plugins are missing here (e.g. the gallery's certificate-* templates). Invalid inputs would
++    // make it throw after that, so saved inputs are checked first and dropped if they are invalid.
++    const open = (template: Template) => {
+       let inputs = getInputFromTemplate(template);
+       const inputsString = localStorage.getItem("inputs");
+       if (inputsString) {
+-        const inputsJson = JSON.parse(inputsString);
+-        inputs = inputsJson;
++        try {
++          const inputsJson = JSON.parse(inputsString);
++          checkInputs(inputsJson);
++          inputs = inputsJson;
++        } catch {
++          localStorage.removeItem("inputs");
++        }
+       }
+ 
+       ui.current = new (mode === "form" ? Form : Viewer)({
+-        domContainer: uiRef.current,
++        domContainer,
+         template,
+         inputs,
+         options: {
+-          font: await getFontsData(),
++          font,
+           lang: 'en',
+           labels: { 'signature.clear': '消去' },
+           theme: {
+@@ -74,17 +79,43 @@
+         },
+         plugins: getPlugins(),
+       });
+-    } catch {
+-      localStorage.removeItem("inputs");
+-      localStorage.removeItem("template");
++    };
++    const tryOpen = (template: Template) => {
++      try {
++        open(template);
++        return true;
++      } catch {
++        return false;
++      }
++    };
++
++    // The gallery template, else the saved one, else a blank one: always exactly one UI.
++    const templateFromLocal = localStorage.getItem("template");
++    if (templateFromQuery && tryOpen(templateFromQuery)) {
++      if (!templateFromLocal) {
++        localStorage.setItem("template", JSON.stringify(templateFromQuery));
++      }
++      return;
+     }
+-  }, [searchParams, setSearchParams]);
++    if (templateFromLocal) {
++      try {
++        const templateJson = JSON.parse(templateFromLocal) as Template;
++        checkTemplate(templateJson);
++        open(templateJson);
++        return;
++      } catch {
++        localStorage.removeItem("inputs");
++        localStorage.removeItem("template");
++      }
++    }
++    open(getBlankTemplate());
++  }, []);
+ 
++  // No buildUi() here: the [mode] effect below destroys the current UI and builds the new one.
+   const onChangeMode = (e: React.ChangeEvent<HTMLInputElement>) => {
+     const value = e.target.value as Mode;
+     setMode(value);
+     localStorage.setItem("mode", value);
+-    buildUi(value);
+   };
+ 
+   const onGetInputs = () => {
+@@ -124,11 +155,19 @@
+   };
+ 
+   useEffect(() => {
+-    buildUi(mode);
++    if (!searchParams.has("template")) return;
++    searchParams.delete("template");
++    setSearchParams(searchParams, { replace: true });
++  }, [searchParams, setSearchParams]);
++
++  useEffect(() => {
++    // An effect that is cleaned up (mode switch, unmount, StrictMode re-run) cancels its pending build.
++    let cancelled = false;
++    buildUi(mode, () => cancelled);
+     return () => {
+-      if (ui.current) {
+-        ui.current.destroy();
+-      }
++      cancelled = true;
++      ui.current?.destroy();
++      ui.current = null;
+     };
+   }, [mode, uiRef, buildUi]);
+ 

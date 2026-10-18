@@ -60,7 +60,7 @@ In linguaggio semplice, SEMPRE con: chi ha scritto cosa (mai la main chat), list
 
 ## Overview
 
-- `packages/*` hold pdfme's TypeScript libraries (npm workspaces). They are **upstream code, unmodified**. `playground/` is the webapp, and all of the owner's changes live there.
+- `packages/*` hold pdfme's TypeScript libraries (npm workspaces). They are upstream code; the only local change is the 2026-10-18 crash fix in `packages/ui` (`DetailView/index.tsx`, `Renderer.tsx`, commit `bc442b2`). `playground/` is the webapp, where all of the owner's other changes live.
 - Routes (`playground/src/App.tsx`): `/` and `/designer` open the Designer (the owner's tool), `/form-viewer` opens Form/Viewer, and `/templates` is the upstream sample gallery.
 - Designer toolbar (`playground/src/routes/Designer.tsx`):
   - Load Template (JSON file).
@@ -88,7 +88,7 @@ In linguaggio semplice, SEMPRE con: chi ha scritto cosa (mai la main chat), list
 | `.clinerules`, `memory_bank/` | legacy upstream Cline files. **This CLAUDE.md is the source of truth**; don't maintain them |
 
 Inside `playground/`:
-- `src/helper.ts`: `getFontsData()` (:22-120, the font map), `generatePDF()` and the template I/O helpers.
+- `src/helper.ts`: `getFontsData()` (:18-116, the font map; every font is an absolute URL built by `fontUrl()`), `generatePDF()` and the template I/O helpers.
 - `src/routes/Designer.tsx`: builds the Designer and sets its options (`maxZoom: 800` at :66).
 - `src/plugins/index.ts`: the 18 schema types the Designer offers.
 - `public/fonts/`: 25 files (8.8 MB). `getFontsData()` loads 18 of them. The other 7 (`helvetica-font*`, `arial-mt*`, `courier*`) are unused, but stay.
@@ -100,11 +100,13 @@ Inside `playground/`:
 
 - Fork point: **upstream `d1db660`** (2025-04-08, "Update dependencies to latest versions"). That is tag `5.3.15` + 15 commits, 4 commits before `5.3.16`: the same release line as aio-promo-monitor's npm 5.3.15. Upstream is now at 6.2.6 (2026-10-16).
 - `origin` is github.com/Mattesackboy/aio-pdfme, a public GitHub fork of pdfme/pdfme. There is no `upstream` remote and there are no tags, so `PDFME_VERSION` and the `pdfmeVersion` of saved templates are `"x.x.x"`.
-- `packages/`, `website/`, `scripts/` and the root `package.json` are identical to `d1db660`. The owner's 8 commits (2025-04-16 to 2026-03-25) touch only `playground/` and `.nvmrc`:
-  - **Fonts** (5607bd1, 4b04a16, 4c5ce35, 135f63e, 7aa1cc3, 0f9d910): `getFontsData()` became async. It fetches 18 TTF/OTF files from `/fonts` as `Uint8Array` (7.76 MB) on top of upstream Roboto, with `Helvetica` as the fallback font. Designer and Form/Viewer `await` it.
+- `website/`, `scripts/` and the root `package.json` are identical to `d1db660`, and so is `packages/` except the crash fix in `packages/ui` (`bc442b2`). The owner's commits:
+  - **Fonts** (5607bd1, 4b04a16, 4c5ce35, 135f63e, 7aa1cc3, 0f9d910): `getFontsData()` became async. It lists 18 TTF/OTF files from `/fonts` on top of upstream Roboto, with `Helvetica` as the fallback font. Designer and Form/Viewer `await` it. Until `bc442b2` the files were fetched as `Uint8Array` (7.76 MB), which triggered the crash; now each font is an absolute URL.
   - **Zoom** (b77744f): `maxZoom` raised from 250 to 800.
   - **Hosting** (26e4847): Firebase Hosting replaces upstream's gh-pages deploy (`firebase.json`, `.firebaserc`, the `deploy` script, `.firebase` gitignored). It also added the `firebase` web SDK dependency, which nothing in `src` imports.
   - **Node pin** (0f9d910): `.nvmrc` = `22`.
+  - **Crash fix** (bc442b2, 2026-10-18): fonts as absolute URLs, a replacer in DetailView's `JSON.stringify(options)` deps, the port of upstream #1576 in `Renderer.tsx`, and the React DevTools opt-out in `playground/index.html`.
+  - **Deploy tooling** (33d5285, 2026-10-18): `firebase-tools` 15.30.2, pinned as a playground devDependency.
 - Leftovers from upstream in the playground are harmless; don't remove them unless asked. They are: Sentry (`sentryVitePlugin` for upstream org `hand-dot`; `Sentry.init` reads `VITE_SENTRY_DSN`, which no `.env` in the repo sets), `copy-vercel-config`, the pdfme links and toasts in the Designer nav, and the upstream e2e tests.
 
 ## Commands
@@ -113,8 +115,8 @@ Inside `playground/`:
 - **Don't run `npm install` / `npm ci`** unless asked. It rewrites `node_modules` and the lockfiles, re-runs the root `postinstall` (`scripts/link-workspaces.sh`, which `npm link`s every package) and can rebuild native modules for the wrong Node.
 - **Packages:** root `npm run build` runs `clean` first, deleting every `packages/*/dist`; the running webapp stays broken until the build finishes. It then builds common, converter and schemas in order, and generator, ui and manipulator in parallel. Per package: `npm run build`, or `npm run dev` for watch mode. Tests: root `npm run test` (Jest in every workspace). Lint: root `npm run lint`.
 - **Webapp, safe:** `cd playground && npx vite`, then open http://localhost:5173. This only starts the dev server; the only thing it writes is Vite's cache in `node_modules/.vite`. `npm run dev` first runs `generate-template-assets`, which rewrites `public/template-assets/index.json`, the thumbnails and `scripts/thumbnail-hash-map.json` (all gitignored) and needs Node 22.
-- **Production build to inspect:** `npx vite build --outDir <tmp-dir> --emptyOutDir` (about 10 s, one ~8.5 MB JS chunk). Never build into `playground/dist` except as part of a deploy. That folder is the deploy artifact: it was built on 2026-03-25, and its `assets/index-16a0f24c.js` is what the live site serves.
-- **Deploy (owner only):** `cd playground && npm run deploy`. Its `predeploy` runs `npm run build` (template assets, `vite build`, copy `vercel.json`), then `firebase deploy --only hosting` deploys target `pdfme` to site `aio-pdfme` in Firebase project `aio-promo-monitor` (alias `prod`). It needs Node 22 for the build and a `firebase` CLI on PATH; firebase-tools is not a project dependency.
+- **Production build to inspect:** `npx vite build --outDir <tmp-dir> --emptyOutDir` (about 10 s, one ~8.5 MB JS chunk). Never build into `playground/dist` except as part of a deploy. That folder is the deploy artifact: it was last built for the 2026-10-18 deploy, and its `assets/index-6ef2fd65.js` is what the live site serves.
+- **Deploy (owner only):** `cd playground && nvm use && npm run deploy`. Its `predeploy` runs `npm run build` (template assets, `vite build`, copy `vercel.json`), then `firebase deploy --only hosting` deploys target `pdfme` to site `aio-pdfme` in Firebase project `aio-promo-monitor` (alias `prod`). The build needs Node 22. The `firebase` CLI comes from the playground's own `node_modules/.bin` (`firebase-tools` 15.30.2, a pinned devDependency since 2026-10-18), so no global install is needed. The global one exists only under nvm v24.16.0, which is why a plain `firebase` command is not found.
 - **Deep links 404 on the live site:** `firebase.json` has no SPA rewrite. Opening `/` works, but loading or refreshing `/designer`, `/form-viewer` or `/templates` directly returns Firebase's 404. (Verified 2026-10-17.)
 
 ## Downstream contract (aio-promo-monitor)
@@ -144,7 +146,13 @@ The consumer is `aio-promo-monitor/src/shared/invoice-generator/`, using npm `@p
 
 ## Known issue
 
-- After a while of use the Designer's Chrome tab crashes ("Aw, Snap!" / "Uffa!", error code 5), and it lags constantly. Per the owner this also happens on vanilla upstream. Study: `docs/research/2026-10-17-designer-crash-study.md`.
+- **Designer tab crash ("Aw, Snap!" / "Uffa!", error code 5) and constant lag: root cause found, fix live.**
+  - The cause was a V8 out-of-memory in the property panel's `JSON.stringify(options)` while the 18 fonts were passed as bytes: about 175 MiB per string, in 70/70 owner crash stacks. The React DevTools extension kept the strings alive.
+  - The lag was the per-field font clone.
+  - Study: `docs/research/2026-10-17-designer-crash-study.md`.
+- Step 1 is committed as `bc442b2` and deployed (2026-10-18): fonts as absolute URLs, the DetailView replacer, the upstream #1576 port and the React DevTools opt-out.
+- Step 2 (F4–F9, F11) is not applied. The patches and the apply order are in `docs/research/2026-10-18-step2-patches/`, the measurements in `docs/research/2026-10-18-step2-fixes-and-studies.md`.
+- State and open decisions: `docs/superpowers/HANDOFF-2026-10-18-designer-crash-fix.md`.
 
 ## Allowed / Not allowed
 

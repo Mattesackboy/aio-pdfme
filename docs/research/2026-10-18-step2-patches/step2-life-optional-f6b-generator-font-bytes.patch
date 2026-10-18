@@ -1,0 +1,40 @@
+--- a/playground/src/helper.ts
++++ b/playground/src/helper.ts
+@@ -201,6 +201,28 @@
+   { value: 'fr', label: 'French' },
+   { value: 'es', label: 'Spanish' },
+ ];
++
++// EXPERIMENT: generate() re-downloads and re-parses every URL font on each call; give it the bytes,
++// fetched once per page. The UI keeps the URLs.
++let generatorFontsPromise: Promise<Font> | null = null;
++const getGeneratorFonts = (): Promise<Font> => {
++  if (!generatorFontsPromise) {
++    generatorFontsPromise = getFontsData().then(async (font) => {
++      const entries = await Promise.all(
++        Object.entries(font).map(async ([name, f]) => {
++          if (typeof f.data !== 'string') return [name, f] as const;
++          const data = new Uint8Array(await (await fetch(f.data)).arrayBuffer());
++          return [name, { ...f, data }] as const;
++        }),
++      );
++      return Object.fromEntries(entries) as Font;
++    });
++    generatorFontsPromise.catch(() => {
++      generatorFontsPromise = null;
++    });
++  }
++  return generatorFontsPromise;
++};
+ 
+ // Object URLs of the last generated PDFs. Chrome's PDF tab re-requests its URL for Download, Ctrl+S
+ // and reload, so a URL is revoked only once MAX_LIVE_PDF_URLS newer PDFs exist. Each live URL keeps
+@@ -216,7 +238,7 @@
+     typeof (currentRef as Viewer | Form).getInputs === 'function'
+       ? (currentRef as Viewer | Form).getInputs()
+       : getInputFromTemplate(template);
+-  const font = await getFontsData();
++  const font = await getGeneratorFonts();
+ 
+   try {
+     const pdf = await generate({
