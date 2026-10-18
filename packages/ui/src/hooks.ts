@@ -4,6 +4,7 @@ import {
   ZOOM,
   Template,
   Size,
+  BasePdf,
   getB64BasePdf,
   b64toUint8Array,
   SchemaForUI,
@@ -37,11 +38,59 @@ const getScale = (n: number, paper: number) =>
 
 type UIPreProcessorProps = { template: Template; size: Size; zoomLevel: number; maxZoom: number };
 
+type BasePdfRaster = { pageSizes: Size[]; backgrounds: string[] };
+
 export const useUIPreProcessor = ({ template, size, zoomLevel, maxZoom }: UIPreProcessorProps) => {
   const [backgrounds, setBackgrounds] = useState<string[]>([]);
   const [pageSizes, setPageSizes] = useState<Size[]>([]);
   const [scale, setScale] = useState(0);
   const [error, setError] = useState<Error | null>(null);
+
+  // A real basePdf is rasterized at scale = maxZoom (A4 at 800%: 4762x6735 px), which is slow,
+  // so the raster is made once and reused while the basePdf stays the same: a resize or the
+  // class re-sending the edited template then only recomputes the scale. Keyed by the basePdf
+  // itself (=== compares a string, data URI or URL, by its text and binary data by reference)
+  // and maxZoom.
+  // Blank-basePdf pages are never cached: they follow the current (dynamic) template's schemas.
+  // Data URLs, not blob: URLs: the same bitmap, with no blob URL lifecycle to manage (nothing to
+  // revoke).
+  const rasterCache = useRef<{
+    basePdf: BasePdf;
+    maxZoom: number;
+    promise: Promise<BasePdfRaster>;
+  } | null>(null);
+  const requestId = useRef(0);
+  const isMounted = useRef(true);
+
+  const getRaster = (basePdf: string | ArrayBuffer | Uint8Array, maxZoom: number) => {
+    const cached = rasterCache.current;
+    if (cached && cached.basePdf === basePdf && cached.maxZoom === maxZoom) {
+      return cached.promise;
+    }
+
+    const promise = (async (): Promise<BasePdfRaster> => {
+      const _basePdf = await getB64BasePdf(basePdf);
+
+      const uint8Array = b64toUint8Array(_basePdf);
+      // Create a new ArrayBuffer copy to avoid detachment issues
+      const pdfArrayBuffer = new ArrayBuffer(uint8Array.byteLength);
+      new Uint8Array(pdfArrayBuffer).set(uint8Array);
+
+      const [_pages, imgBuffers] = await Promise.all([
+        pdf2size(pdfArrayBuffer),
+        pdf2img(pdfArrayBuffer.slice(), { scale: maxZoom }),
+      ]);
+      return { pageSizes: _pages, backgrounds: imgBuffers.map(arrayBufferToBase64) };
+    })();
+
+    const entry: NonNullable<typeof rasterCache.current> = { basePdf, maxZoom, promise };
+    rasterCache.current = entry;
+    promise.catch(() => {
+      // never keep a failed raster
+      if (rasterCache.current === entry) rasterCache.current = null;
+    });
+    return promise;
+  };
 
   const init = async (prop: { template: Template; size: Size }) => {
     const {
@@ -64,21 +113,11 @@ export const useUIPreProcessor = ({ template, size, zoomLevel, maxZoom }: UIPreP
       );
       _pageSizes = schemas.map(() => ({ width, height }));
     } else {
-      const _basePdf = await getB64BasePdf(basePdf);
-
-      const uint8Array = b64toUint8Array(_basePdf);
-      // Create a new ArrayBuffer copy to avoid detachment issues
-      const pdfArrayBuffer = new ArrayBuffer(uint8Array.byteLength);
-      new Uint8Array(pdfArrayBuffer).set(uint8Array);
-
-      const [_pages, imgBuffers] = await Promise.all([
-        pdf2size(pdfArrayBuffer),
-        pdf2img(pdfArrayBuffer.slice(), { scale: maxZoom }),
-      ]);
-      _pageSizes = _pages;
+      const raster = await getRaster(basePdf, maxZoom);
+      _pageSizes = raster.pageSizes;
       paperWidth = _pageSizes[0].width * ZOOM;
       paperHeight = _pageSizes[0].height * ZOOM;
-      _backgrounds = imgBuffers.map(arrayBufferToBase64);
+      _backgrounds = raster.backgrounds;
     }
 
     const _scale = Math.min(
@@ -93,30 +132,43 @@ export const useUIPreProcessor = ({ template, size, zoomLevel, maxZoom }: UIPreP
     };
   };
 
+  // Only the latest init may set the state (or the error): an older one that finishes later,
+  // e.g. the raster of a basePdf that was replaced meanwhile, is dropped.
+  const runInit = async (prop: { template: Template; size: Size }) => {
+    const id = ++requestId.current;
+    const isLatest = () => isMounted.current && id === requestId.current;
+    try {
+      const { pageSizes, scale, backgrounds } = await init(prop);
+      if (!isLatest()) return;
+      setPageSizes(pageSizes);
+      setScale(scale);
+      setBackgrounds(backgrounds);
+    } catch (err) {
+      if (isLatest()) throw err;
+    }
+  };
+
   useEffect(() => {
-    init({ template, size })
-      .then(({ pageSizes, scale, backgrounds }) => {
-        setPageSizes(pageSizes);
-        setScale(scale);
-        setBackgrounds(backgrounds);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        console.error('[@pdfme/ui]', err);
-      });
+    runInit({ template, size }).catch((err: Error) => {
+      setError(err);
+      console.error('[@pdfme/ui]', err);
+    });
   }, [template, size]);
+
+  useEffect(
+    () => () => {
+      isMounted.current = false;
+      rasterCache.current = null;
+    },
+    [],
+  );
 
   return {
     backgrounds,
     pageSizes,
     scale: scale * zoomLevel,
     error,
-    refresh: (template: Template) =>
-      init({ template, size }).then(({ pageSizes, scale, backgrounds }) => {
-        setPageSizes(pageSizes);
-        setScale(scale);
-        setBackgrounds(backgrounds);
-      }),
+    refresh: (template: Template) => runInit({ template, size }),
   };
 };
 

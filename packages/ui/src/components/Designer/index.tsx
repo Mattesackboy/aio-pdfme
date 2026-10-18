@@ -73,6 +73,32 @@ const TemplateEditor = ({
   const [zoomLevel, setZoomLevel] = useState(1);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [prevTemplate, setPrevTemplate] = useState<Template | null>(null);
+  // The class keeps the template this editor hands it (onChangeTemplate / onSaveTemplate) and
+  // passes that same object back on its next render (resize, lang change). That echo must not
+  // trigger the full re-sync below, which re-creates every schema id, drops the selection and
+  // scrolls to the top. Real updates (updateTemplate, Load Template, ...) arrive as new objects.
+  // Every template object this editor has applied or emitted is known, not just the last one:
+  // when two Designer instances render into one container (the playground builds two for a
+  // gallery link, and on the Vite dev server under StrictMode), the other one re-sends its own
+  // older template on every resize, and that must not replace the edits either.
+  // TODO(undo-emit): undo/redo (timeTravel in hooks.ts) change the schemas without emitting, so
+  // after an undo getTemplate() (Save Local, DL Template, Generate PDF) returns the pre-undo
+  // template until the next edit. Pre-existing in 5.3.15; upstream emits on undo since #1643.
+  const knownTemplates = useRef(new WeakSet<Template>());
+  const emitChangeTemplate = useCallback(
+    (t: Template) => {
+      knownTemplates.current.add(t);
+      onChangeTemplate(t);
+    },
+    [onChangeTemplate],
+  );
+  const emitSaveTemplate = useCallback(
+    (t: Template) => {
+      knownTemplates.current.add(t);
+      onSaveTemplate(t);
+    },
+    [onSaveTemplate],
+  );
 
   const { backgrounds, pageSizes, scale, error, refresh } = useUIPreProcessor({
     template,
@@ -110,9 +136,9 @@ const TemplateEditor = ({
       const _schemasList = cloneDeep(schemasList);
       _schemasList[pageCursor] = newSchemas;
       setSchemasList(_schemasList);
-      onChangeTemplate(schemasList2template(_schemasList, template.basePdf));
+      emitChangeTemplate(schemasList2template(_schemasList, template.basePdf));
     },
-    [template, schemasList, pageCursor, onChangeTemplate],
+    [template, schemasList, pageCursor, emitChangeTemplate],
   );
 
   const removeSchemas = useCallback(
@@ -146,7 +172,7 @@ const TemplateEditor = ({
     changeSchemas,
     commitSchemas,
     removeSchemas,
-    onSaveTemplate,
+    onSaveTemplate: emitSaveTemplate,
     past,
     future,
     setSchemasList,
@@ -224,7 +250,7 @@ const TemplateEditor = ({
   const updatePage = async (sl: SchemaForUI[][], newPageCursor: number) => {
     setPageCursor(newPageCursor);
     const newTemplate = schemasList2template(sl, template.basePdf);
-    onChangeTemplate(newTemplate);
+    emitChangeTemplate(newTemplate);
     await updateTemplate(newTemplate);
     void refresh(newTemplate);
 
@@ -253,7 +279,10 @@ const TemplateEditor = ({
 
   if (prevTemplate !== template) {
     setPrevTemplate(template);
-    void updateTemplate(template);
+    if (!knownTemplates.current.has(template)) {
+      knownTemplates.current.add(template);
+      void updateTemplate(template);
+    }
   }
 
   const canvasWidth = size.width - LEFT_SIDEBAR_WIDTH;
