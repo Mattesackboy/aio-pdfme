@@ -88,7 +88,14 @@ function DesignerApp() {
 
   const onDownloadTemplate = () => {
     if (designer.current) {
-      downloadJsonFile(designer.current.getTemplate(), "template");
+      const input = window.prompt('Template file name:', 'template');
+      if (input === null) return;
+      const name =
+        input
+          .trim()
+          .replace(/\.json$/i, '')
+          .replace(/[\\/:*?"<>|]/g, '-') || 'template';
+      downloadJsonFile(designer.current.getTemplate(), name);
       toast.success(
         <div>
           <p>Can you share the template you created? ❤️</p>
