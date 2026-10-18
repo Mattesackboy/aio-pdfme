@@ -60,7 +60,7 @@ In linguaggio semplice, SEMPRE con: chi ha scritto cosa (mai la main chat), list
 
 ## Overview
 
-- `packages/*` hold pdfme's TypeScript libraries (npm workspaces). They are upstream code; the only local change is the 2026-10-18 crash fix in `packages/ui` (`DetailView/index.tsx`, `Renderer.tsx`, commit `bc442b2`). `playground/` is the webapp, where all of the owner's other changes live.
+- `packages/*` hold pdfme's TypeScript libraries (npm workspaces). They are upstream code; the only local changes are the 2026-10-18 fixes in `packages/ui`: the crash fix (`DetailView/index.tsx`, `Renderer.tsx`, commit `bc442b2`) and the resize fix (`hooks.ts`, `Designer/index.tsx`, commit `2f1bd43`). `playground/` is the webapp, where all of the owner's other changes live.
 - Routes (`playground/src/App.tsx`): `/` and `/designer` open the Designer (the owner's tool), `/form-viewer` opens Form/Viewer, and `/templates` is the upstream sample gallery.
 - Designer toolbar (`playground/src/routes/Designer.tsx`):
   - Load Template (JSON file).
@@ -100,13 +100,14 @@ Inside `playground/`:
 
 - Fork point: **upstream `d1db660`** (2025-04-08, "Update dependencies to latest versions"). That is tag `5.3.15` + 15 commits, 4 commits before `5.3.16`: the same release line as aio-promo-monitor's npm 5.3.15. Upstream is now at 6.2.6 (2026-10-16).
 - `origin` is github.com/Mattesackboy/aio-pdfme, a public GitHub fork of pdfme/pdfme. There is no `upstream` remote and there are no tags, so `PDFME_VERSION` and the `pdfmeVersion` of saved templates are `"x.x.x"`.
-- `website/`, `scripts/` and the root `package.json` are identical to `d1db660`, and so is `packages/` except the crash fix in `packages/ui` (`bc442b2`). The owner's commits:
+- `website/`, `scripts/` and the root `package.json` are identical to `d1db660`, and so is `packages/` except the crash and resize fixes in `packages/ui` (`bc442b2`, `2f1bd43`). The owner's commits:
   - **Fonts** (5607bd1, 4b04a16, 4c5ce35, 135f63e, 7aa1cc3, 0f9d910): `getFontsData()` became async. It lists 18 TTF/OTF files from `/fonts` on top of upstream Roboto, with `Helvetica` as the fallback font. Designer and Form/Viewer `await` it. Until `bc442b2` the files were fetched as `Uint8Array` (7.76 MB), which triggered the crash; now each font is an absolute URL.
   - **Zoom** (b77744f): `maxZoom` raised from 250 to 800.
   - **Hosting** (26e4847): Firebase Hosting replaces upstream's gh-pages deploy (`firebase.json`, `.firebaserc`, the `deploy` script, `.firebase` gitignored). It also added the `firebase` web SDK dependency, which nothing in `src` imports.
   - **Node pin** (0f9d910): `.nvmrc` = `22`.
   - **Crash fix** (bc442b2, 2026-10-18): fonts as absolute URLs, a replacer in DetailView's `JSON.stringify(options)` deps, the port of upstream #1576 in `Renderer.tsx`, and the React DevTools opt-out in `playground/index.html`.
   - **Deploy tooling** (33d5285, 2026-10-18): `firebase-tools` 15.30.2, pinned as a playground devDependency.
+  - **Resize** (2f1bd43, 2026-10-18): the basePdf raster is cached per basePdf + maxZoom, so a resize only rescales. The editor skips the re-sync when the class echoes a template it already applied or emitted (a WeakSet), so selection and scroll survive a resize.
 - Leftovers from upstream in the playground are harmless; don't remove them unless asked. They are: Sentry (`sentryVitePlugin` for upstream org `hand-dot`; `Sentry.init` reads `VITE_SENTRY_DSN`, which no `.env` in the repo sets), `copy-vercel-config`, the pdfme links and toasts in the Designer nav, and the upstream e2e tests.
 
 ## Commands
@@ -151,7 +152,7 @@ The consumer is `aio-promo-monitor/src/shared/invoice-generator/`, using npm `@p
   - The lag was the per-field font clone.
   - Study: `docs/research/2026-10-17-designer-crash-study.md`.
 - Step 1 is committed as `bc442b2` and deployed (2026-10-18): fonts as absolute URLs, the DetailView replacer, the upstream #1576 port and the React DevTools opt-out.
-- Step 2 (F4–F9, F11) is not applied. The patches and the apply order are in `docs/research/2026-10-18-step2-patches/`, the measurements in `docs/research/2026-10-18-step2-fixes-and-studies.md`.
+- From step 2 only the resize part (F5 + F9) is applied, as `2f1bd43`. The rest (F4, F6–F8, F11, error reset, undo emit) is not wanted for now. The patches are in `docs/research/2026-10-18-step2-patches/`, and they no longer apply cleanly on top of `2f1bd43`. The measurements are in `docs/research/2026-10-18-step2-fixes-and-studies.md`.
 - State and open decisions: `docs/superpowers/HANDOFF-2026-10-18-designer-crash-fix.md`.
 
 ## Allowed / Not allowed
