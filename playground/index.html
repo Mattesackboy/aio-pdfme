@@ -6,6 +6,9 @@
   <link rel="icon" href="/favicon.ico" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>pdfme Playground</title>
+  <!-- Opt this page out of React DevTools: with the extension attached, every field selection keeps one more
+       property-panel generation alive (crash follow-up study 2026-10-18). React 16/18 skip the hook when isDisabled. -->
+  <script>(function () { var h = window.__REACT_DEVTOOLS_GLOBAL_HOOK__; if (h) { h.isDisabled = true; } })();</script>
 </head>
 
 <body>

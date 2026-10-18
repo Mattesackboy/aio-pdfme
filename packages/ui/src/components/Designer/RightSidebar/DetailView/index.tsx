@@ -80,7 +80,13 @@ const DetailView = (props: DetailViewProps) => {
       });
     }
     setWidgets(newWidgets);
-  }, [activeSchema, pluginsRegistry, JSON.stringify(options)]);
+  }, [
+    activeSchema,
+    pluginsRegistry,
+    JSON.stringify(options, (k: string, v: unknown) =>
+      k === 'data' && v !== null && typeof v === 'object' ? '...' : v,
+    ),
+  ]);
 
   useEffect(() => {
     // Create a type-safe copy of the schema with editable property

@@ -10,11 +10,7 @@ export function fromKebabCase(str: string): string {
     .join(' ');
 }
 
-const loadFontAsUint8Array = async (url: string): Promise<Uint8Array> => {
-  const response = await fetch(url);
-  const buffer = await response.arrayBuffer();
-  return new Uint8Array(buffer);
-};
+const fontUrl = (file: string): string => new URL('/fonts/' + file, window.location.origin).href;
 
 const DefaultFont = { ...getDefaultFont() };
 DefaultFont.Roboto.fallback = false;
@@ -22,87 +18,87 @@ DefaultFont.Roboto.fallback = false;
 export const getFontsData = async (): Promise<Font> => ({
   Helvetica: {
     fallback: true,
-    data: await loadFontAsUint8Array('/fonts/helvetica.ttf'),
+    data: fontUrl('helvetica.ttf'),
   },
   HelveticaBold: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/helvetica-bold.ttf'),
+    data: fontUrl('helvetica-bold.ttf'),
   },
   HelveticaLight: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/helvetica-light.ttf'),
+    data: fontUrl('helvetica-light.ttf'),
   },
   Arial: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/arial.ttf'),
+    data: fontUrl('arial.ttf'),
   },
   ArialBold: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/arial-bold.ttf'),
+    data: fontUrl('arial-bold.ttf'),
   },
   MyriadProRegular: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/myriad-pro-regular.otf'),
+    data: fontUrl('myriad-pro-regular.otf'),
   },
   MyriadProBold: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/myriad-pro-bold.otf'),
+    data: fontUrl('myriad-pro-bold.otf'),
   },
   HelveticaOblique: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/helvetica-oblique.ttf'),
+    data: fontUrl('helvetica-oblique.ttf'),
   },
   HelveticaBoldOblique: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/helvetica-bold-oblique.ttf'),
+    data: fontUrl('helvetica-bold-oblique.ttf'),
   },
   HelveticaLightOblique: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/helvetica-light-oblique.ttf'),
+    data: fontUrl('helvetica-light-oblique.ttf'),
   },
   OpenSansRegular: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/OpenSans-Regular.ttf'),
+    data: fontUrl('OpenSans-Regular.ttf'),
   },
   OpenSansMedium: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/OpenSans-Medium.ttf'),
+    data: fontUrl('OpenSans-Medium.ttf'),
   },
   OpenSansSemiBold: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/OpenSans-SemiBold.ttf'),
+    data: fontUrl('OpenSans-SemiBold.ttf'),
   },
   OpenSansBold: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/OpenSans-Bold.ttf'),
+    data: fontUrl('OpenSans-Bold.ttf'),
   },
   SegoeUI: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/segoe-ui.ttf'),
+    data: fontUrl('segoe-ui.ttf'),
   },
   SegoeUIBold: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/segoe-ui-bold.ttf'),
+    data: fontUrl('segoe-ui-bold.ttf'),
   },
   SegoeUIItalic: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/segoe-ui-italic.ttf'),
+    data: fontUrl('segoe-ui-italic.ttf'),
   },
   SegoeUIBoldItalic: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/segoe-ui-bold-italic.ttf'),
+    data: fontUrl('segoe-ui-bold-italic.ttf'),
   },
   /*Helvetica: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/helvetica-font.ttf'),
+    data: fontUrl('helvetica-font.ttf'),
   },
   HelveticaBold: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/helvetica-font-bold.ttf'),
+    data: fontUrl('helvetica-font-bold.ttf'),
   },
   HelveticaLight: {
     fallback: false,
-    data: await loadFontAsUint8Array('/fonts/helvetica-font-light.ttf'),
+    data: fontUrl('helvetica-font-light.ttf'),
   },*/
   /*'PinyonScript-Regular': {
     fallback: false,
