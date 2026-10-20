@@ -88,6 +88,14 @@ export const getFontsData = async (): Promise<Font> => ({
     fallback: false,
     data: fontUrl('segoe-ui-bold-italic.ttf'),
   },
+  TimesNewRoman: {
+    fallback: false,
+    data: fontUrl('times-new-roman.ttf'),
+  },
+  TimesNewRomanBold: {
+    fallback: false,
+    data: fontUrl('times-new-roman-bold.ttf'),
+  },
   /*Helvetica: {
     fallback: false,
     data: fontUrl('helvetica-font.ttf'),

@@ -88,10 +88,10 @@ In linguaggio semplice, SEMPRE con: chi ha scritto cosa (mai la main chat), list
 | `.clinerules`, `memory_bank/` | legacy upstream Cline files. **This CLAUDE.md is the source of truth**; don't maintain them |
 
 Inside `playground/`:
-- `src/helper.ts`: `getFontsData()` (:18-116, the font map; every font is an absolute URL built by `fontUrl()`), `generatePDF()` and the template I/O helpers.
+- `src/helper.ts`: `getFontsData()` (:18-124, the font map; every font is an absolute URL built by `fontUrl()`), `generatePDF()` and the template I/O helpers.
 - `src/routes/Designer.tsx`: builds the Designer and sets its options (`maxZoom: 800` at :66).
 - `src/plugins/index.ts`: the 18 schema types the Designer offers.
-- `public/fonts/`: 25 files (8.8 MB). `getFontsData()` loads 18 of them. The other 7 (`helvetica-font*`, `arial-mt*`, `courier*`) are unused, but stay.
+- `public/fonts/`: 27 files (9.7 MB). `getFontsData()` loads 20 of them. The other 7 (`helvetica-font*`, `arial-mt*`, `courier*`) are unused, but stay.
 - `public/template-assets/`: upstream sample templates. `index.json` and the `thumbnail.png` files are generated (gitignored). `scripts/` holds the two generators.
 - `dist/`: the **deploy artifact** (gitignored). Hosting config is in `firebase.json` and `.firebaserc`.
 - `node_modules/@pdfme/*` are symlinks into `packages/*/dist` (the `file:../packages/*/dist` dependencies). The webapp runs the **built** packages: Vite serves `packages/*/dist/esm/...` and `packages/ui/dist/index.es.js`. A change in `packages/*/src` does nothing until you rebuild.
@@ -101,7 +101,7 @@ Inside `playground/`:
 - Fork point: **upstream `d1db660`** (2025-04-08, "Update dependencies to latest versions"). That is tag `5.3.15` + 15 commits, 4 commits before `5.3.16`: the same release line as aio-promo-monitor's npm 5.3.15. Upstream is now at 6.2.6 (2026-10-16).
 - `origin` is github.com/Mattesackboy/aio-pdfme, a public GitHub fork of pdfme/pdfme. There is no `upstream` remote and there are no tags, so `PDFME_VERSION` and the `pdfmeVersion` of saved templates are `"x.x.x"`.
 - `website/`, `scripts/` and the root `package.json` are identical to `d1db660`, and so is `packages/` except the crash and resize fixes in `packages/ui` (`bc442b2`, `2f1bd43`). The owner's commits:
-  - **Fonts** (5607bd1, 4b04a16, 4c5ce35, 135f63e, 7aa1cc3, 0f9d910): `getFontsData()` became async. It lists 18 TTF/OTF files from `/fonts` on top of upstream Roboto, with `Helvetica` as the fallback font. Designer and Form/Viewer `await` it. Until `bc442b2` the files were fetched as `Uint8Array` (7.76 MB), which triggered the crash; now each font is an absolute URL.
+  - **Fonts** (5607bd1, 4b04a16, 4c5ce35, 135f63e, 7aa1cc3, 0f9d910): `getFontsData()` became async. It lists 18 TTF/OTF files from `/fonts` on top of upstream Roboto, with `Helvetica` as the fallback font. Designer and Form/Viewer `await` it. Until `bc442b2` the files were fetched as `Uint8Array` (7.76 MB), which triggered the crash; now each font is an absolute URL. Times New Roman (`TimesNewRoman`, `TimesNewRomanBold`) was added on 2026-10-20, copied md5-identical from aio-promo-monitor.
   - **Zoom** (b77744f): `maxZoom` raised from 250 to 800.
   - **Hosting** (26e4847): Firebase Hosting replaces upstream's gh-pages deploy (`firebase.json`, `.firebaserc`, the `deploy` script, `.firebase` gitignored). It also added the `firebase` web SDK dependency, which nothing in `src` imports.
   - **Node pin** (0f9d910): `.nvmrc` = `22`.
@@ -137,7 +137,7 @@ The consumer is `aio-promo-monitor/src/shared/invoice-generator/`, using npm `@p
 | Unieuro, Mediaworld | none (`undefined`). Their `Helvetica` fields are drawn with pdf-lib's built-in standard Helvetica, with wrap/alignment metrics from the Roboto fallback (`@pdfme/schemas` 5.3.15 `text/pdfRender.js:55-56`) |
 
 - Font names used by the templates today: Arial, ArialBold, Helvetica, HelveticaBold, OpenSansRegular, OpenSansMedium, OpenSansBold, SegoeUI, SegoeUIBoldItalic. When a font map is passed, a `fontName` missing from it makes `generate()` throw (`checkFont`: `... of template.schemas is not found in font`).
-- **Font files:** the consumer keeps its own copies in `assets/fonts/`. Arial, ArialBold, OpenSans*, SegoeUI, SegoeUIBoldItalic and MyriadPro* are md5-identical to `playground/public/fonts/`. The consumer's `helvetica.ttf` and `helvetica-bold.ttf` are different files: they match this repo's **old** `helvetica-font.ttf` and `helvetica-font-bold.ttf` (not loaded here since 4c5ce35). So `Helvetica` and `HelveticaBold` in the Designer are not the faces the Foto Erhardt invoices embed. (Verified by md5, 2026-10-17.)
+- **Font files:** the consumer keeps its own copies in `src/shared/assets/fonts/`. Arial, ArialBold, OpenSans*, SegoeUI, SegoeUIBoldItalic, MyriadPro* and `times-new-roman*` are md5-identical to `playground/public/fonts/`. No aio-promo-monitor loader registers Times New Roman yet; its keys there must be `TimesNewRoman` / `TimesNewRomanBold`. The consumer's `helvetica.ttf` and `helvetica-bold.ttf` are different files: they match this repo's **old** `helvetica-font.ttf` and `helvetica-font-bold.ttf` (not loaded here since 4c5ce35). So `Helvetica` and `HelveticaBold` in the Designer are not the faces the Foto Erhardt invoices embed. (Verified by md5, 2026-10-17.)
 - **What can break invoices:** the keys of `getFontsData()` are part of the contract. Renaming or removing a font, adding a schema type the consumer doesn't register, or changing the template format can all break invoice generation in aio-promo-monitor. An upgrade of `packages/*` past 5.3.x could change the template format.
 
 ## Product constraints
